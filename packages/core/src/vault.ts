@@ -17,6 +17,7 @@ import {
   setupRecoveryKey,
   unlockWithPassword,
   unlockWithRecoveryKey,
+  verifyMasterPassword,
 } from "./keys";
 import {
   AuditEvent,
@@ -49,6 +50,21 @@ const AD_SETTINGS = "settings:v1";
 export type NewItemInput = Pick<VaultItem, "type" | "title"> &
   Partial<Omit<VaultItem, "id" | "createdAt" | "updatedAt" | "versions" | "passwordHistory">>;
 
+/**
+ * Proof of fresh reauthentication for security-sensitive operations (spec: "Recovery
+ * changes must require reauthentication"). The master password is verified by core.
+ * A vault opened with the recovery key counts as reauthenticated for the recovery flow
+ * itself (that unlock IS the stronger credential).
+ */
+export type Reauth = { masterPassword: string };
+
+export class ReauthRequiredError extends Error {
+  constructor() {
+    super("Reauthentication with the master password is required for this action.");
+    this.name = "ReauthRequiredError";
+  }
+}
+
 export class VaultStore {
   private header: VaultHeader;
   private keys: UnlockedKeys;
@@ -57,6 +73,8 @@ export class VaultStore {
   settings: VaultSettings;
   private storage: StorageAdapter;
   private now: () => string;
+  private unlockedVia: "password" | "recovery";
+  private integrityWarnings: string[] = [];
 
   private constructor(
     header: VaultHeader,
@@ -66,6 +84,7 @@ export class VaultStore {
     settings: VaultSettings,
     storage: StorageAdapter,
     now: () => string,
+    unlockedVia: "password" | "recovery",
   ) {
     this.header = header;
     this.keys = keys;
@@ -74,6 +93,7 @@ export class VaultStore {
     this.settings = settings;
     this.storage = storage;
     this.now = now;
+    this.unlockedVia = unlockedVia;
   }
 
   static async create(
@@ -82,7 +102,7 @@ export class VaultStore {
     now: () => string = () => new Date().toISOString(),
   ): Promise<VaultStore> {
     const { header, keys } = createVaultHeader(masterPassword, now());
-    const store = new VaultStore(header, keys, [], [], structuredClone(DEFAULT_SETTINGS), storage, now);
+    const store = new VaultStore(header, keys, [], [], structuredClone(DEFAULT_SETTINGS), storage, now, "password");
     store.log("vault_created");
     await store.persist();
     return store;
@@ -104,12 +124,28 @@ export class VaultStore {
     const settings = file.settings
       ? { ...structuredClone(DEFAULT_SETTINGS), ...decryptJson<Partial<VaultSettings>>(file.settings, keys.vk, AD_SETTINGS) }
       : structuredClone(DEFAULT_SETTINGS);
-    const store = new VaultStore(file.header, keys, items, audit, settings, storage, now);
+    const store = new VaultStore(
+      file.header, keys, items, audit, settings, storage, now,
+      "password" in credential ? "password" : "recovery",
+    );
+    // Recovery-stripping detection: the encrypted settings remember which recovery key
+    // should exist; if the plaintext header no longer agrees, the file was tampered with.
+    if (settings.recoveryKeyId && file.header.recovery?.keyId !== settings.recoveryKeyId) {
+      store.integrityWarnings.push(
+        "This vault previously had a recovery key configured, but its recovery data is now missing or altered. " +
+          "The vault file may have been tampered with. Create a fresh recovery kit now, and treat old kits as invalid.",
+      );
+    }
     if ("recoveryKey" in credential) {
       store.log("recovery_unlock");
       await store.persist();
     }
     return store;
+  }
+
+  /** Non-empty if the vault file shows signs of tampering — shells must surface these. */
+  getIntegrityWarnings(): string[] {
+    return [...this.integrityWarnings];
   }
 
   // ---- serialization -------------------------------------------------------
@@ -287,17 +323,33 @@ export class VaultStore {
 
   // ---- keys / recovery -----------------------------------------------------
 
-  /** Create or rotate the recovery key. Caller must have reauthenticated first. */
-  async createRecoveryKey(): Promise<string> {
+  /**
+   * Reauth is enforced HERE, not trusted to the UI: pass the master password (verified
+   * against the header), except when the vault was opened with the recovery key — that
+   * unlock already proved the stronger credential (this is the forgot-password flow).
+   */
+  private requireReauth(reauth?: Reauth): void {
+    if (this.unlockedVia === "recovery") return;
+    if (!reauth || !verifyMasterPassword(this.header, reauth.masterPassword)) {
+      throw new ReauthRequiredError();
+    }
+  }
+
+  /** Create or rotate the recovery key. Requires reauthentication. */
+  async createRecoveryKey(reauth?: Reauth): Promise<string> {
+    this.requireReauth(reauth);
     const rotating = !!this.header.recovery;
     const { header, recoveryKey } = setupRecoveryKey(this.header, this.keys, this.now());
     this.header = header;
+    this.settings.recoveryKeyId = header.recovery!.keyId;
     this.log(rotating ? "recovery_key_rotated" : "recovery_key_created");
     await this.persist();
     return recoveryKey;
   }
 
-  async changeMasterPassword(newPassword: string): Promise<void> {
+  /** Change the master password. Requires reauthentication (see requireReauth). */
+  async changeMasterPassword(newPassword: string, reauth?: Reauth): Promise<void> {
+    this.requireReauth(reauth);
     this.header = rewrapWithNewPassword(this.header, this.keys, newPassword);
     this.log("master_password_changed");
     await this.persist();

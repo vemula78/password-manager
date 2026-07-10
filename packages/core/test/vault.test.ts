@@ -125,7 +125,7 @@ describe("VaultStore", () => {
     const storage = memStorage();
     const store = await VaultStore.create("original-pw", storage, now);
     await store.addItem({ type: "login", title: "Item", fields: { password: "p" } });
-    const recoveryKey = await store.createRecoveryKey();
+    const recoveryKey = await store.createRecoveryKey({ masterPassword: "original-pw" });
     expect(recoveryKey.replace(/-/g, "")).toHaveLength(26);
 
     const viaRecovery = await VaultStore.open(

@@ -12,7 +12,9 @@ import {
 import { parseVaultFile } from "./vault";
 
 export const BACKUP_MAGIC = "pwm-backup";
-const AD_PAYLOAD = "backup:payload:v1";
+// createdAt is bound into the AEAD associated data so a payload cannot be paired with a
+// different package header (mix-and-match of old payloads with new keyrings fails auth).
+const adPayload = (createdAt: string) => `backup:payload:v1:${createdAt}`;
 
 export interface BackupPackage {
   format: typeof BACKUP_MAGIC;
@@ -41,7 +43,7 @@ export function createBackup(store: {
       bkEnvelopes: header.bkEnvelopes,
       ...(header.recovery ? { recovery: header.recovery } : {}),
     },
-    payload: encryptJson(store.serialize(), store.getBackupKey(), AD_PAYLOAD),
+    payload: encryptJson(store.serialize(), store.getBackupKey(), adPayload(now)),
   };
   return JSON.stringify(pkg);
 }
@@ -79,12 +81,25 @@ export function restoreBackup(
   let vaultSerialized: string;
   try {
     vaultSerialized = JSON.parse(
-      utf8decode(decrypt(pkg.payload, keys.bk, AD_PAYLOAD)),
+      utf8decode(decrypt(pkg.payload, keys.bk, adPayload(pkg.createdAt))),
     ) as string;
   } catch {
     throw new Error("Backup failed integrity check — it may be corrupted or tampered with.");
   }
-  parseVaultFile(vaultSerialized); // integrity: payload must be a well-formed vault
+  const inner = parseVaultFile(vaultSerialized); // integrity: payload must be a well-formed vault
+  // The package keyring must be exactly the vault's own header — otherwise someone paired
+  // this payload with a foreign/altered keyring (e.g. to strip or swap recovery envelopes).
+  const same = (a: unknown, b: unknown) => JSON.stringify(a ?? null) === JSON.stringify(b ?? null);
+  const h = inner.header;
+  const k = pkg.keyring;
+  if (
+    !same(h.kdf, k.kdf) ||
+    !same(h.vkEnvelopes, k.vkEnvelopes) ||
+    !same(h.bkEnvelopes, k.bkEnvelopes) ||
+    !same(h.recovery, k.recovery)
+  ) {
+    throw new Error("Backup failed integrity check — its key data does not match its contents.");
+  }
   return { vaultSerialized, createdAt: pkg.createdAt };
 }
 

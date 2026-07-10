@@ -27,7 +27,7 @@ async function vaultWithData() {
     title: "SBI",
     fields: { loginPassword: "bank-secret-1", mpin: "1234" },
   });
-  const recoveryKey = await store.createRecoveryKey();
+  const recoveryKey = await store.createRecoveryKey({ masterPassword: "master-pw" });
   return { store, storage, recoveryKey };
 }
 

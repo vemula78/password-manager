@@ -70,10 +70,34 @@ export function newKdfParams(): KdfParams {
   };
 }
 
+// Bounds for KDF params read from (potentially attacker-controlled) vault/backup files —
+// prevents resource-exhaustion via absurd ops/mem values in a tampered file.
+const MIN_OPSLIMIT = 1;
+const MAX_OPSLIMIT = 10;
+const MIN_MEMLIMIT = 8 * 1024 * 1024;
+const MAX_MEMLIMIT = 1024 * 1024 * 1024;
+
+export function validateKdfParams(params: KdfParams): void {
+  if (params.alg !== "argon2id13") throw new Error(`Unsupported KDF: ${params.alg}`);
+  if (
+    !Number.isInteger(params.opsLimit) ||
+    params.opsLimit < MIN_OPSLIMIT ||
+    params.opsLimit > MAX_OPSLIMIT ||
+    !Number.isInteger(params.memLimitBytes) ||
+    params.memLimitBytes < MIN_MEMLIMIT ||
+    params.memLimitBytes > MAX_MEMLIMIT
+  ) {
+    throw new Error("Vault file has out-of-range KDF parameters — refusing to derive.");
+  }
+  if (fromB64(params.saltB64).length !== SALT_BYTES) {
+    throw new Error("Vault file has an invalid KDF salt.");
+  }
+}
+
 /** Derive the KEK from the master password with Argon2id. Never persisted. */
 export function deriveKek(masterPassword: string, params: KdfParams): Uint8Array {
   const s = so();
-  if (params.alg !== "argon2id13") throw new Error(`Unsupported KDF: ${params.alg}`);
+  validateKdfParams(params);
   return s.crypto_pwhash(
     KEY_BYTES,
     masterPassword,

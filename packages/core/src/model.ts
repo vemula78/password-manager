@@ -99,6 +99,12 @@ export interface VaultSettings {
   };
   ownerName: string;
   emergencyContact: string;
+  /**
+   * Recorded inside the ENCRYPTED settings when a recovery key is created. If the plaintext
+   * header's recovery envelopes later disappear or change without this being updated, the
+   * vault file was tampered with (recovery stripping) — surfaced as an integrity warning.
+   */
+  recoveryKeyId: string | null;
 }
 
 export const DEFAULT_SETTINGS: VaultSettings = {
@@ -114,6 +120,7 @@ export const DEFAULT_SETTINGS: VaultSettings = {
   },
   ownerName: "",
   emergencyContact: "",
+  recoveryKeyId: null,
 };
 
 export const MAX_VERSIONS_PER_ITEM = 20;
