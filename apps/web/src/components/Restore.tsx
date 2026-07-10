@@ -6,10 +6,13 @@ import {
   parseBackup,
   restoreBackup,
   VaultStore,
+  WrongCredentialError,
 } from "@pw/core";
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { connectDrive, driveConnected, getDriveClient } from "../lib/gdrive";
+import { loadConfig, recordFailedUnlock, resetUnlockFails } from "../lib/config";
 import { idbAdapter, saveVaultBlob } from "../lib/storage";
+import { PostRecoveryFlow } from "./PostRecoveryFlow";
 import { formatDateTime, Warning } from "./ui";
 
 export function RestorePanel(props: {
@@ -30,6 +33,21 @@ export function RestorePanel(props: {
   const [driveFiles, setDriveFiles] = useState<DriveFile[] | null>(null);
   const [driveBusy, setDriveBusy] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
+
+  // Unlock backoff — restoring a backup is also a credential-guessing surface, so it
+  // shares the same client-side rate limit as the unlock screen.
+  const [config, setConfig] = useState(() => loadConfig());
+  const [nowTick, setNowTick] = useState(Date.now());
+  const blockedForMs = Math.max(0, config.unlock.until - nowTick);
+  useEffect(() => {
+    if (blockedForMs <= 0) return;
+    const t = window.setInterval(() => setNowTick(Date.now()), 1000);
+    return () => window.clearInterval(t);
+  }, [blockedForMs > 0]);
+
+  // Restoring with the recovery key forces a new master password + offers key rotation
+  // before handing control back to the caller — same as Unlock.tsx's recovery flow.
+  const [recStore, setRecStore] = useState<VaultStore | null>(null);
 
   const loadText = (text: string, sourceLabel: string) => {
     setErr("");
@@ -75,7 +93,7 @@ export function RestorePanel(props: {
   };
 
   const doRestore = async () => {
-    if (!backupText) return;
+    if (!backupText || blockedForMs > 0) return;
     setBusy(true);
     setErr("");
     await new Promise((r) => setTimeout(r, 30)); // let the busy state paint before Argon2id
@@ -86,8 +104,21 @@ export function RestorePanel(props: {
       await saveVaultBlob(vaultSerialized);
       const store = await VaultStore.open(vaultSerialized, credential, idbAdapter);
       await store.logAndPersist("restore_completed");
-      props.onRestored(store);
+      setConfig(resetUnlockFails(config));
+      if (credKind === "recoveryKey") {
+        // Force a new master password + offer key rotation before unlocking, same as
+        // the unlock screen's recovery flow.
+        setRecStore(store);
+        setBusy(false);
+      } else {
+        props.onRestored(store);
+      }
     } catch (e) {
+      if (e instanceof WrongCredentialError) {
+        const next = recordFailedUnlock(config);
+        setConfig(next);
+        setNowTick(Date.now());
+      }
       setErr(e instanceof Error ? e.message : String(e));
       setBusy(false);
     }
@@ -95,7 +126,15 @@ export function RestorePanel(props: {
 
   const needsConfirm = props.hasLocalVault;
   const canRestore =
-    !!backupText && !!secret && (!needsConfirm || confirmText === "RESTORE") && !busy;
+    !!backupText &&
+    !!secret &&
+    (!needsConfirm || confirmText === "RESTORE") &&
+    !busy &&
+    blockedForMs <= 0;
+
+  if (recStore) {
+    return <PostRecoveryFlow store={recStore} onDone={props.onRestored} />;
+  }
 
   return (
     <div className="restore-panel">
@@ -204,6 +243,11 @@ export function RestorePanel(props: {
       )}
 
       {err && <p className="error">{err}</p>}
+      {blockedForMs > 0 && (
+        <p className="error">
+          Too many failed attempts. Try again in {Math.ceil(blockedForMs / 1000)}s.
+        </p>
+      )}
       <div className="btn-row">
         <button className="btn" onClick={props.onCancel} disabled={busy}>
           Cancel

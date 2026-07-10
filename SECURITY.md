@@ -37,7 +37,12 @@ residual risks we accept knowingly in V1.
 3. **Item titles in the encrypted activity history.** The audit log records item titles for
    usability. It is encrypted with the vault key, never leaves the device, and can be cleared
    in Settings.
-4. **Memory hygiene is best-effort in JavaScript.** Keys are zeroed after use (libsodium
+4. **Unlock rate-limiting is local deterrence, not a cryptographic control.** The failed-unlock
+   backoff lives in browser storage and an attacker with the device can clear it — or skip the
+   app entirely and brute-force the vault file offline. The real defence against password
+   guessing is Argon2id (64 MiB, ops 3) plus a long passphrase; the backoff exists to slow
+   casual/shoulder-surf attempts on your own device.
+5. **Memory hygiene is best-effort in JavaScript.** Keys are zeroed after use (libsodium
    `memzero`), but JS runtimes may have copied buffers or strings the app cannot scrub. This
    is inherent to every JS password manager.
 

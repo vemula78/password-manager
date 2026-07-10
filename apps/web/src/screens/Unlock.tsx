@@ -7,9 +7,8 @@ import {
   WrongCredentialError,
 } from "@pw/core";
 import { useEffect, useMemo, useState } from "react";
-import { KitOverlay, kitFromStore } from "../components/Kit";
+import { PostRecoveryFlow } from "../components/PostRecoveryFlow";
 import { RestorePanel } from "../components/Restore";
-import { StrengthMeter, Warning } from "../components/ui";
 import {
   loadConfig,
   recordFailedUnlock,
@@ -18,7 +17,7 @@ import {
 import { idbAdapter } from "../lib/storage";
 
 type Mode = "password" | "recovery" | "restore";
-type RecoveryStage = "key" | "newpass" | "rotate";
+type RecoveryStage = "key" | "post";
 
 export function Unlock(props: { blob: string; onUnlocked: (s: VaultStore) => void }) {
   const [mode, setMode] = useState<Mode>("password");
@@ -32,9 +31,6 @@ export function Unlock(props: { blob: string; onUnlocked: (s: VaultStore) => voi
   const [recKey, setRecKey] = useState("");
   const [recStage, setRecStage] = useState<RecoveryStage>("key");
   const [recStore, setRecStore] = useState<VaultStore | null>(null);
-  const [newPwd, setNewPwd] = useState("");
-  const [newPwd2, setNewPwd2] = useState("");
-  const [kit, setKit] = useState<ReturnType<typeof kitFromStore> | null>(null);
 
   const recoveryAvailable = useMemo(() => {
     try {
@@ -92,7 +88,7 @@ export function Unlock(props: { blob: string; onUnlocked: (s: VaultStore) => voi
     try {
       const store = await VaultStore.open(props.blob, { recoveryKey: recKey }, idbAdapter);
       setRecStore(store);
-      setRecStage("newpass");
+      setRecStage("post");
       setBusy(false);
     } catch (e) {
       if (e instanceof WrongCredentialError) {
@@ -104,45 +100,6 @@ export function Unlock(props: { blob: string; onUnlocked: (s: VaultStore) => voi
       setBusy(false);
     }
   };
-
-  const setNewMasterPassword = async () => {
-    if (!recStore) return;
-    setBusy(true);
-    setErr("");
-    await new Promise((r) => setTimeout(r, 30));
-    try {
-      await recStore.changeMasterPassword(newPwd);
-      setRecStage("rotate");
-      setBusy(false);
-    } catch (e) {
-      setErr(e instanceof Error ? e.message : String(e));
-      setBusy(false);
-    }
-  };
-
-  const rotateKey = async () => {
-    if (!recStore) return;
-    setBusy(true);
-    try {
-      const key = await recStore.createRecoveryKey();
-      setKit(kitFromStore(recStore, key));
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  if (kit && recStore) {
-    return (
-      <KitOverlay
-        kit={kit}
-        onClose={() => {
-          setKit(null);
-          void finishUnlock(recStore);
-        }}
-        onPrinted={() => void recStore.logAndPersist("emergency_kit_exported")}
-      />
-    );
-  }
 
   return (
     <div className="center-page">
@@ -235,66 +192,8 @@ export function Unlock(props: { blob: string; onUnlocked: (s: VaultStore) => voi
           </form>
         )}
 
-        {mode === "recovery" && recStage === "newpass" && (
-          <form
-            onSubmit={(e) => {
-              e.preventDefault();
-              if (newPwd && newPwd === newPwd2 && !busy) void setNewMasterPassword();
-            }}
-          >
-            <h2>Set a new master password</h2>
-            <p className="muted">
-              Recovery unlocked your vault. Choose a new master password now — the old one no
-              longer matters. A long passphrase of 4–5 random words is easiest to remember.
-            </p>
-            <label className="field">
-              <span>New master password</span>
-              <input
-                type="password"
-                value={newPwd}
-                onChange={(e) => setNewPwd(e.target.value)}
-                autoFocus
-                autoComplete="new-password"
-              />
-            </label>
-            <StrengthMeter password={newPwd} />
-            <label className="field">
-              <span>Confirm new master password</span>
-              <input
-                type="password"
-                value={newPwd2}
-                onChange={(e) => setNewPwd2(e.target.value)}
-                autoComplete="new-password"
-              />
-            </label>
-            {newPwd2 && newPwd !== newPwd2 && <p className="error">Passwords do not match.</p>}
-            {err && <p className="error">{err}</p>}
-            <button
-              type="submit"
-              className="btn primary full"
-              disabled={!newPwd || newPwd !== newPwd2 || busy}
-            >
-              {busy ? "Saving…" : "Set new master password"}
-            </button>
-          </form>
-        )}
-
-        {mode === "recovery" && recStage === "rotate" && recStore && (
-          <div>
-            <h2>Rotate your recovery key?</h2>
-            <Warning>
-              The recovery key you just used still works. If it may have been seen by anyone
-              else, rotate it now and print a fresh emergency kit.
-            </Warning>
-            <div className="btn-row">
-              <button className="btn" onClick={() => void finishUnlock(recStore)} disabled={busy}>
-                Keep existing key
-              </button>
-              <button className="btn primary" onClick={() => void rotateKey()} disabled={busy}>
-                {busy ? "Rotating…" : "Rotate key & show new kit"}
-              </button>
-            </div>
-          </div>
+        {mode === "recovery" && recStage === "post" && recStore && (
+          <PostRecoveryFlow store={recStore} onDone={(s) => void finishUnlock(s)} />
         )}
 
         {mode === "restore" && (

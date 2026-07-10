@@ -101,16 +101,25 @@ export function Items() {
                   ))}
                 </span>
               </span>
-              <button
+              <span
+                role="button"
+                tabIndex={0}
                 className={`star ${i.favorite ? "on" : ""}`}
                 aria-label={i.favorite ? "Remove favorite" : "Mark favorite"}
                 onClick={(e) => {
                   e.stopPropagation();
                   void store.updateItem(i.id, { favorite: !i.favorite }).then(app.refresh);
                 }}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" || e.key === " ") {
+                    e.stopPropagation();
+                    e.preventDefault();
+                    void store.updateItem(i.id, { favorite: !i.favorite }).then(app.refresh);
+                  }
+                }}
               >
                 {i.favorite ? "★" : "☆"}
-              </button>
+              </span>
             </div>
           ))}
         </div>
@@ -179,7 +188,7 @@ function ItemDetail(props: { item: VaultItem; onEdit: () => void; onClosed: () =
   }, [item.id]);
 
   const reveal = async (key: string, label: string) => {
-    const ok = await app.requestReauth(`Reveal “${label}” — this field is sensitive.`);
+    const ok = await app.requestReauth(`Reveal “${label}” — this field is sensitive.`, item.id);
     if (!ok) return;
     setRevealed((s) => new Set(s).add(key));
     store.log("sensitive_revealed", `${item.title} — ${label}`);
@@ -195,7 +204,7 @@ function ItemDetail(props: { item: VaultItem; onEdit: () => void; onClosed: () =
     });
 
   const copySensitive = async (value: string, label: string) => {
-    const ok = await app.requestReauth(`Copy “${label}” — this field is sensitive.`);
+    const ok = await app.requestReauth(`Copy “${label}” — this field is sensitive.`, item.id);
     if (!ok) return;
     await app.copyWithClear(value, `${label} copied`);
     store.log("password_copied", `${item.title} — ${label}`);
@@ -371,9 +380,25 @@ function ItemForm(props: { type: ItemType; item?: VaultItem; onDone: (id?: strin
   const editing = !!props.item;
 
   const [title, setTitle] = useState(props.item?.title ?? "");
-  const [fields, setFields] = useState<Record<string, string>>({ ...(props.item?.fields ?? {}) });
+  // Editing an existing item: sensitive fields are NEVER hydrated into state with their
+  // decrypted value (replace-only pattern) — only non-sensitive fields are pre-filled.
+  // New items have nothing to hydrate either way.
+  const [fields, setFields] = useState<Record<string, string>>(() => {
+    const src = props.item?.fields ?? {};
+    if (!editing) return { ...src };
+    const f: Record<string, string> = {};
+    for (const [k, v] of Object.entries(src)) {
+      const def = tpl.fields.find((d) => d.key === k);
+      if (def?.sensitive) continue;
+      f[k] = v;
+    }
+    return f;
+  });
+  // How many custom fields existed on the original item — used to tell "existing" (may be
+  // hidden) custom fields apart from ones added during this edit session (never hidden).
+  const initialCustomCount = props.item?.customFields.length ?? 0;
   const [customFields, setCustomFields] = useState<CustomField[]>(
-    props.item?.customFields.map((c) => ({ ...c })) ?? [],
+    props.item?.customFields.map((c) => (editing && c.sensitive ? { ...c, value: "" } : { ...c })) ?? [],
   );
   const [notes, setNotes] = useState(props.item?.notes ?? "");
   const [folder, setFolder] = useState(props.item?.folder ?? "");
@@ -382,29 +407,60 @@ function ItemForm(props: { type: ItemType; item?: VaultItem; onDone: (id?: strin
     props.item?.reminders.map((r) => ({ ...r })) ?? [],
   );
   const [visible, setVisible] = useState<Set<string>>(new Set());
+  // Template-field keys the user has clicked "Replace" on, and ones explicitly cleared.
+  const [replacedKeys, setReplacedKeys] = useState<Set<string>>(new Set());
+  const [clearedKeys, setClearedKeys] = useState<Set<string>>(new Set());
+  // Same, but for custom fields, keyed by array index.
+  const [replacedCustom, setReplacedCustom] = useState<Set<number>>(new Set());
+  const [clearedCustom, setClearedCustom] = useState<Set<number>>(new Set());
   const [genFor, setGenFor] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
 
   const setField = (key: string, value: string) => setFields((f) => ({ ...f, [key]: value }));
 
-  const toggleVisible = async (def: FieldDef) => {
-    if (visible.has(def.key)) {
-      setVisible((s) => {
-        const n = new Set(s);
-        n.delete(def.key);
-        return n;
-      });
-      return;
-    }
-    // Revealing a stored sensitive value in the edit form needs reauth too.
-    if (editing && props.item?.fields[def.key]) {
-      const ok = await app.requestReauth(`Show “${def.label}” while editing.`);
-      if (!ok) return;
-      store.log("sensitive_revealed", `${props.item.title} — ${def.label}`);
-      await store.persist();
-    }
-    setVisible((s) => new Set(s).add(def.key));
+  const toggleVisible = (def: FieldDef) => {
+    // Only ever shows what's currently typed in the input — for a sensitive field being
+    // edited, that input only exists after "Replace", so there is never a stored secret
+    // to reveal here; no reauth needed.
+    setVisible((s) => {
+      const n = new Set(s);
+      if (n.has(def.key)) n.delete(def.key);
+      else n.add(def.key);
+      return n;
+    });
+  };
+
+  const replaceField = (key: string) => {
+    setClearedKeys((s) => {
+      const n = new Set(s);
+      n.delete(key);
+      return n;
+    });
+    setReplacedKeys((s) => new Set(s).add(key));
+    setField(key, "");
+  };
+
+  const clearField = (key: string) => {
+    setReplacedKeys((s) => new Set(s).add(key));
+    setClearedKeys((s) => new Set(s).add(key));
+    setField(key, "");
+  };
+
+  const replaceCustom = (i: number) => {
+    setClearedCustom((s) => {
+      const n = new Set(s);
+      n.delete(i);
+      return n;
+    });
+    setReplacedCustom((s) => new Set(s).add(i));
+    setCustomFields((a) => a.map((c, j) => (j === i ? { ...c, value: "" } : c)));
+  };
+
+  const clearCustom = (i: number) => {
+    setReplacedCustom((s) => new Set(s).add(i));
+    setClearedCustom((s) => new Set(s).add(i));
+    setCustomFields((a) => a.map((c, j) => (j === i ? { ...c, value: "" } : c)));
   };
 
   const save = async () => {
@@ -412,11 +468,42 @@ function ItemForm(props: { type: ItemType; item?: VaultItem; onDone: (id?: strin
     setErr("");
     try {
       const cleanFields: Record<string, string> = {};
-      for (const [k, v] of Object.entries(fields)) if (v.trim() !== "") cleanFields[k] = v;
+      for (const def of tpl.fields) {
+        const key = def.key;
+        if (editing && def.sensitive) {
+          const typed = (fields[key] ?? "").trim();
+          if (replacedKeys.has(key) && typed !== "") {
+            cleanFields[key] = typed;
+          } else if (!clearedKeys.has(key)) {
+            // Not replaced, or replaced but left empty: keep the previously stored value
+            // untouched rather than risk wiping it out.
+            const old = props.item?.fields[key];
+            if (old && old.trim() !== "") cleanFields[key] = old;
+          }
+          // else: explicitly cleared and left empty — omit (delete the value).
+          continue;
+        }
+        const v = fields[key];
+        if (v !== undefined && v.trim() !== "") cleanFields[key] = v;
+      }
+
+      const finalCustomFields = customFields.map((cf, i) => {
+        // Use the field's *original* sensitivity, not the live checkbox — otherwise
+        // unchecking "Sensitive" on a still-hidden field would silently wipe its value.
+        const originallySensitive =
+          editing && i < initialCustomCount && !!props.item?.customFields[i]?.sensitive;
+        if (!originallySensitive) return cf;
+        const typed = cf.value.trim();
+        if (replacedCustom.has(i) && typed !== "") return { ...cf, value: typed };
+        if (clearedCustom.has(i)) return { ...cf, value: "" };
+        const old = props.item?.customFields[i]?.value ?? "";
+        return { ...cf, value: old };
+      });
+
       const data = {
         title: title.trim(),
         fields: cleanFields,
-        customFields: customFields.filter((c) => c.label.trim() || c.value.trim()),
+        customFields: finalCustomFields.filter((c) => c.label.trim() || c.value.trim()),
         notes,
         folder: folder.trim() || null,
         tags: tags.split(",").map((t) => t.trim()).filter(Boolean),
@@ -437,6 +524,24 @@ function ItemForm(props: { type: ItemType; item?: VaultItem; onDone: (id?: strin
 
   const inputFor = (def: FieldDef) => {
     const value = fields[def.key] ?? "";
+
+    // Replace-only pattern: an existing item's sensitive field is never hydrated with its
+    // decrypted value. Show a placeholder row until the user explicitly chooses to replace it.
+    const hadStoredValue = editing && !!props.item?.fields[def.key];
+    if (def.sensitive && hadStoredValue && !replacedKeys.has(def.key)) {
+      return (
+        <div className="input-row">
+          <span className="hidden-value">Saved — hidden</span>
+          <button type="button" className="btn tiny" onClick={() => replaceField(def.key)}>
+            Replace
+          </button>
+          <button type="button" className="btn tiny" onClick={() => clearField(def.key)}>
+            Clear value
+          </button>
+        </div>
+      );
+    }
+
     if (def.kind === "multiline") {
       return (
         <textarea
@@ -462,7 +567,7 @@ function ItemForm(props: { type: ItemType; item?: VaultItem; onDone: (id?: strin
           spellCheck={false}
         />
         {secret && (
-          <button type="button" className="btn tiny" onClick={() => void toggleVisible(def)}>
+          <button type="button" className="btn tiny" onClick={() => toggleVisible(def)}>
             {visible.has(def.key) ? "Hide" : "Show"}
           </button>
         )}
@@ -500,7 +605,14 @@ function ItemForm(props: { type: ItemType; item?: VaultItem; onDone: (id?: strin
         </div>
 
         <h4>Custom fields</h4>
-        {customFields.map((cf, i) => (
+        {customFields.map((cf, i) => {
+          const hadStoredValue =
+            editing &&
+            i < initialCustomCount &&
+            !!props.item?.customFields[i]?.sensitive &&
+            !!props.item?.customFields[i]?.value;
+          const showHidden = hadStoredValue && !replacedCustom.has(i);
+          return (
           <div className="custom-field-row" key={i}>
             <input
               placeholder="Label"
@@ -509,15 +621,27 @@ function ItemForm(props: { type: ItemType; item?: VaultItem; onDone: (id?: strin
                 setCustomFields((a) => a.map((c, j) => (j === i ? { ...c, label: e.target.value } : c)))
               }
             />
-            <input
-              placeholder="Value"
-              type={cf.sensitive ? "password" : "text"}
-              value={cf.value}
-              autoComplete="off"
-              onChange={(e) =>
-                setCustomFields((a) => a.map((c, j) => (j === i ? { ...c, value: e.target.value } : c)))
-              }
-            />
+            {showHidden ? (
+              <div className="input-row">
+                <span className="hidden-value">Saved — hidden</span>
+                <button type="button" className="btn tiny" onClick={() => replaceCustom(i)}>
+                  Replace
+                </button>
+                <button type="button" className="btn tiny" onClick={() => clearCustom(i)}>
+                  Clear value
+                </button>
+              </div>
+            ) : (
+              <input
+                placeholder="Value"
+                type={cf.sensitive ? "password" : "text"}
+                value={cf.value}
+                autoComplete="off"
+                onChange={(e) =>
+                  setCustomFields((a) => a.map((c, j) => (j === i ? { ...c, value: e.target.value } : c)))
+                }
+              />
+            )}
             <label className="check">
               <input
                 type="checkbox"
@@ -534,7 +658,8 @@ function ItemForm(props: { type: ItemType; item?: VaultItem; onDone: (id?: strin
               ✕
             </button>
           </div>
-        ))}
+          );
+        })}
         <button
           type="button"
           className="btn tiny"

@@ -65,7 +65,7 @@ export interface AppCtx {
    * Ask the user to reconfirm the master password (cached 60s). Resolves with a Reauth
    * proof to pass to core operations, or null if cancelled.
    */
-  requestReauth(reason: string): Promise<Reauth | null>;
+  requestReauth(reason: string, itemId?: string): Promise<Reauth | null>;
   copyWithClear(value: string, label?: string): Promise<void>;
   toast(msg: string, kind?: Toast["kind"]): void;
   config: AppConfig;
@@ -103,7 +103,9 @@ export function AppProvider(props: {
     reason: string;
     resolve: (reauth: Reauth | null) => void;
   } | null>(null);
-  const reauthCache = useRef<{ reauth: Reauth; at: number } | null>(null);
+  // Cached reauth is scoped to a single item — a reauth granted for one item's sensitive
+  // field must not silently unlock another item's, or vault-wide (non-item) actions.
+  const reauthCache = useRef<{ reauth: Reauth; at: number; itemId: string } | null>(null);
   const toastId = useRef(0);
   const clipboardTimer = useRef<number | null>(null);
 
@@ -133,9 +135,11 @@ export function AppProvider(props: {
     props.onLock();
   }, [props]);
 
-  const requestReauth = useCallback((reason: string): Promise<Reauth | null> => {
+  const requestReauth = useCallback((reason: string, itemId?: string): Promise<Reauth | null> => {
     const cached = reauthCache.current;
-    if (cached && Date.now() - cached.at < REAUTH_CACHE_MS) {
+    // Only ever reuse a cached reauth for the same item. Non-item actions (settings, kit,
+    // etc — itemId undefined) always require a fresh reauth and are never cached.
+    if (itemId && cached && cached.itemId === itemId && Date.now() - cached.at < REAUTH_CACHE_MS) {
       return Promise.resolve(cached.reauth);
     }
     reauthCache.current = null;
@@ -143,7 +147,7 @@ export function AppProvider(props: {
       setReauthReq({
         reason,
         resolve: (reauth) => {
-          if (reauth) reauthCache.current = { reauth, at: Date.now() };
+          if (reauth && itemId) reauthCache.current = { reauth, at: Date.now(), itemId };
           setReauthReq(null);
           resolve(reauth);
         },

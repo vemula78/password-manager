@@ -11,6 +11,7 @@ import { idbAdapter } from "../lib/storage";
 // Spec §Warnings — shown verbatim on the skip path.
 const SKIP_WARNING =
   "If you forget your master password and lose your recovery key, your encrypted vault may be impossible to recover.";
+const SHARE_WARNING = "Never share your master password.";
 
 type Step = "welcome" | "kit" | "verify" | "restore";
 
@@ -109,6 +110,7 @@ export function Onboarding(props: { onUnlocked: (s: VaultStore) => void }) {
               />
             </label>
             {pwd2 && pwd !== pwd2 && <p className="error">Passwords do not match.</p>}
+            <Warning>{SHARE_WARNING}</Warning>
             {err && <p className="error">{err}</p>}
             <button type="submit" className="btn primary full" disabled={!pwd || pwd !== pwd2 || busy}>
               {busy ? "Creating encrypted vault…" : "Create vault"}

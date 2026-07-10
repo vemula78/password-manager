@@ -2,18 +2,28 @@
 // (fresh device) and the Backup screen (replace current vault). The backup opens ONLY
 // with the vault's master password or its recovery key, and integrity is validated by
 // core before anything is written.
-import React, { useState } from "react";
+//
+// Restoring via the RECOVERY KEY is treated the same as the Recover flow (see
+// RecoverScreen.tsx): the store was opened without proving the master password, so
+// before it is ever adopted/unlocked in the app we force the user to set a brand-new
+// master password and automatically rotate the recovery key (the old one, embedded in
+// the backup file, would otherwise keep working forever). Restoring with the master
+// password itself already proves knowledge of the password, so that path is unchanged.
+import React, { useMemo, useState } from "react";
 import { KeyboardAvoidingView, Platform, ScrollView, StyleSheet, Text, TouchableOpacity } from "react-native";
 import * as DocumentPicker from "expo-document-picker";
 import { File } from "expo-file-system";
-import { VaultStore, restoreBackup } from "@pw/core";
+import { usePreventScreenCapture } from "expo-screen-capture";
+import { VaultStore, restoreBackup, estimateStrength } from "@pw/core";
 import { fileStorage } from "../storage";
 import { useVault } from "./VaultContext";
 import { clearStoredMasterPassword } from "../security/biometric";
-import { Button, Chip, Field, WarningBanner } from "../components/ui";
+import { Button, Chip, Field, StrengthBar, WarningBanner } from "../components/ui";
+import { RecoveryKeyCard } from "../components/RecoveryKeyCard";
 import { colors, spacing } from "../theme";
 
 export function RestoreVaultView({ onDone, onCancel }: { onDone: () => void; onCancel: () => void }) {
+  usePreventScreenCapture("restore-vault");
   const { adoptStore, setPrefs } = useVault();
   const [backupText, setBackupText] = useState<string | null>(null);
   const [fileName, setFileName] = useState("");
@@ -21,6 +31,16 @@ export function RestoreVaultView({ onDone, onCancel }: { onDone: () => void; onC
   const [credential, setCredential] = useState("");
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
+
+  // Present only when the backup was opened via recovery key and is awaiting a forced
+  // master-password reset before it can be adopted.
+  const [pendingStore, setPendingStore] = useState<VaultStore | null>(null);
+  const [step, setStep] = useState<"pick" | "newPassword" | "rotate">("pick");
+  const [newPassword, setNewPassword] = useState("");
+  const [confirm, setConfirm] = useState("");
+  const [newRecoveryKey, setNewRecoveryKey] = useState<string | null>(null);
+
+  const strength = useMemo(() => estimateStrength(newPassword), [newPassword]);
 
   const pick = async () => {
     setError("");
@@ -50,14 +70,93 @@ export function RestoreVaultView({ onDone, onCancel }: { onDone: () => void; onC
       await clearStoredMasterPassword();
       setPrefs({ biometricEnabled: null });
       setCredential("");
-      adoptStore(store);
-      onDone();
+
+      if (credKind === "recoveryKey") {
+        // Opened via recovery key only — mirror RecoverScreen: force a new master
+        // password before this store is ever adopted/unlocked in the app.
+        setPendingStore(store);
+        setStep("newPassword");
+      } else {
+        adoptStore(store);
+        onDone();
+      }
     } catch (e) {
       setError(e instanceof Error ? e.message : "Restore failed.");
     } finally {
       setBusy(false);
     }
   };
+
+  const setPassword = async () => {
+    if (!pendingStore) return;
+    setError("");
+    if (newPassword.length < 8) {
+      setError("Use at least 8 characters — a long passphrase is best.");
+      return;
+    }
+    if (newPassword !== confirm) {
+      setError("Passwords do not match.");
+      return;
+    }
+    setBusy(true);
+    try {
+      await pendingStore.changeMasterPassword(newPassword);
+      // Any biometric-cached master password is now stale — remove it.
+      await clearStoredMasterPassword();
+      setPrefs({ biometricEnabled: null }); // re-offer on next password unlock
+      const rotated = await pendingStore.createRecoveryKey(); // the recovery key used to
+      // restore this backup would otherwise still open it
+      setNewRecoveryKey(rotated);
+      setNewPassword("");
+      setConfirm("");
+      setStep("rotate");
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Could not set the new password.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  if (step === "rotate" && newRecoveryKey && pendingStore) {
+    return (
+      <ScrollView style={styles.screen} contentContainerStyle={styles.content}>
+        <WarningBanner text="Your master password was changed and a NEW recovery key was generated. The old recovery key no longer works." />
+        <RecoveryKeyCard
+          recoveryKey={newRecoveryKey}
+          clipboardClearSeconds={pendingStore.settings.clipboardClearSeconds}
+          onConfirmed={() => {
+            setNewRecoveryKey(null);
+            adoptStore(pendingStore);
+            onDone();
+          }}
+        />
+      </ScrollView>
+    );
+  }
+
+  if (step === "newPassword" && pendingStore) {
+    return (
+      <KeyboardAvoidingView style={styles.screen} behavior={Platform.OS === "ios" ? "padding" : undefined}>
+        <ScrollView contentContainerStyle={styles.content} keyboardShouldPersistTaps="handled">
+          <Text style={styles.title}>Set a new master password</Text>
+          <Text style={{ color: colors.subtext, marginBottom: spacing.xl, lineHeight: 20 }}>
+            This backup was unlocked with a recovery key. You must set a new master password
+            before restoring it to this device.
+          </Text>
+          <Field
+            label="New master password"
+            secureTextEntry
+            value={newPassword}
+            onChangeText={setNewPassword}
+          />
+          {newPassword ? <StrengthBar strength={strength.strength} bits={strength.bits} /> : null}
+          <Field label="Confirm" secureTextEntry value={confirm} onChangeText={setConfirm} />
+          {error ? <Text style={{ color: colors.danger, marginBottom: spacing.md }}>{error}</Text> : null}
+          <Button title="Set new master password" onPress={() => void setPassword()} busy={busy} />
+        </ScrollView>
+      </KeyboardAvoidingView>
+    );
+  }
 
   return (
     <KeyboardAvoidingView style={styles.screen} behavior={Platform.OS === "ios" ? "padding" : undefined}>
