@@ -1,0 +1,8 @@
+{
+  "name": "pw-manager",
+  "private": true,
+  "workspaces": ["packages/*", "apps/*"],
+  "scripts": {
+    "test": "npm --workspace @pw/core run test"
+  }
+}
