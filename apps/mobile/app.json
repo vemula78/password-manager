@@ -1,0 +1,41 @@
+{
+  "expo": {
+    "name": "Password Vault",
+    "slug": "pw-vault",
+    "version": "0.1.0",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "light",
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "org.pwmanager.vault",
+      "infoPlist": {
+        "NSFaceIDUsageDescription": "Face ID is used to unlock your vault and to reveal or copy sensitive fields."
+      }
+    },
+    "android": {
+      "package": "org.pwmanager.vault",
+      "adaptiveIcon": {
+        "backgroundColor": "#E6F4FE",
+        "foregroundImage": "./assets/android-icon-foreground.png",
+        "backgroundImage": "./assets/android-icon-background.png",
+        "monochromeImage": "./assets/android-icon-monochrome.png"
+      },
+      "predictiveBackGestureEnabled": false
+    },
+    "web": {
+      "favicon": "./assets/favicon.png"
+    },
+    "plugins": [
+      "expo-secure-store",
+      "expo-sharing",
+      "react-native-libsodium",
+      [
+        "expo-local-authentication",
+        {
+          "faceIDPermission": "Face ID is used to unlock your vault and to reveal or copy sensitive fields."
+        }
+      ]
+    ]
+  }
+}
