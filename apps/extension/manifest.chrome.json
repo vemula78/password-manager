@@ -1,0 +1,29 @@
+{
+  "manifest_version": 3,
+  "name": "Password Vault — Extension",
+  "short_name": "Vault",
+  "version": "0.1.0",
+  "description": "Companion browser extension for the zero-knowledge Password Vault. Imports an encrypted backup and helps you fill, copy, and generate credentials safely.",
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Password Vault"
+  },
+  "background": {
+    "service_worker": "background.js"
+  },
+  "permissions": ["activeTab", "scripting", "storage", "alarms", "clipboardWrite", "offscreen"],
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "commands": {
+    "_execute_action": {
+      "suggested_key": {
+        "default": "Ctrl+Shift+Y",
+        "mac": "MacCtrl+Shift+Y"
+      },
+      "description": "Open Password Vault search"
+    }
+  }
+}

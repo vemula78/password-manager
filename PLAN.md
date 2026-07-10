@@ -59,6 +59,13 @@ SPEC.md  PLAN.md
    background, screenshot protection, secure reveal. ✅ gate: Expo app boots and core flows
    work (simulator/Expo Go; device signing is Praveen's step).
 4. **M4 — Verification**: fresh-context subagent audits against SPEC § Acceptance Criteria +
-   Security Principles; fix findings; final commit.
+   Security Principles; fix findings; final commit. ✅ done 10-Jul-2026 (all testable criteria
+   passed; two Codex security reviews folded in — see NOTES/).
+5. **M5 — Basic browser extension** (added 10-Jul-2026, Praveen delegated the call): MV3
+   Chrome/Edge/Firefox, own encrypted vault copy imported from a `.pwmbackup` + master
+   password (reuses core `restoreBackup`; no live sync — that's V2). Popup search/copy/fill,
+   save-current-site, generator, domain/HTTP/lookalike warnings, hard refusal to fill
+   transaction passwords/MPIN/TPIN/UPI PIN/CVV (copy/reveal only, behind reauth). Background
+   worker holds the unlocked store in memory; worker death = lock.
 
 Each milestone ends with a commit (author Praveen Vemula <vemula78@gmail.com>).
