@@ -17,8 +17,17 @@ describe("compareHosts", () => {
   it("ignores a leading www.", () => {
     expect(compareHosts("www.sbi.co.in", "sbi.co.in")).toBe("exact");
   });
-  it("recognizes subdomains as related", () => {
+  it("recognizes the active host being a SUBdomain of the stored host", () => {
     expect(compareHosts("netbanking.sbi.co.in", "sbi.co.in")).toBe("subdomain");
+  });
+  it("is asymmetric: the PARENT direction is a mismatch (no silent fill on the parent)", () => {
+    // Item saved for login.example.com must not silently fill on example.com …
+    expect(compareHosts("example.com", "login.example.com")).toBe("mismatch");
+    // … and an item saved for mysite.github.io must not match github.io itself.
+    expect(compareHosts("github.io", "mysite.github.io")).toBe("mismatch");
+  });
+  it("does not match sibling subdomains", () => {
+    expect(compareHosts("othersite.github.io", "mysite.github.io")).toBe("mismatch");
   });
   it("flags unrelated hosts as a mismatch", () => {
     expect(compareHosts("evil.example", "sbi.co.in")).toBe("mismatch");

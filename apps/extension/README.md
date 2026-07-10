@@ -39,10 +39,25 @@ automatically on every page.
 ## Security rules enforced in code (not just UI)
 
 - **Domain match / lookalike / phishing warning** (`src/lib/domain.ts`): before any fill, the
-  active tab's host is compared against the item's stored URL host. An exact or subdomain
-  match proceeds silently; anything else — including confusable-character typosquats like
+  active tab's host is compared against the item's stored URL host. Matching is deliberately
+  ASYMMETRIC: an exact match, or the active host being a *subdomain* of the stored host,
+  proceeds silently; the parent direction does NOT (an item saved for `login.example.com`
+  never silently fills on `example.com`, and `mysite.github.io` never silently fills on
+  `github.io` — no public-suffix list is bundled, so parent-direction fills go through the
+  explicit confirmation path). Anything else — including confusable-character typosquats like
   `paypa1.com` vs `paypal.com` — requires an explicit "Fill anyway" confirmation.
+- **TOCTOU guard on fill**: the background never trusts the popup's snapshot of the tab or
+  URL. At fill time it re-queries the active tab of the current window, requires it to be the
+  same tab the popup targeted, re-reads its URL *at that moment*, and aborts if the host no
+  longer equals the host the popup displayed (and any confirmation was given for). The full
+  check re-runs after every confirmation round-trip, so a tab that navigates to a phishing
+  page between warning and "Fill anyway" is caught.
 - **HTTP warning**: filling on a plain `http://` page also requires confirmation.
+- **Sender validation**: the background rejects any runtime message that does not come from
+  this extension's own pages, and vault-touching requests (unlock, import, list, get, reveal,
+  save, settings, fill) additionally must come from the popup page itself. Content scripts
+  have no message surface at all — the content script only ever *replies* to a
+  `tabs.sendMessage` from the background.
 - **Never auto-fill sensitive banking fields**: transaction passwords, MPIN, TPIN, and CVV are
   never candidates for the "Fill" action (`src/lib/sensitiveFields.ts`, built directly off
   `@pw/core`'s field templates so it can't silently drift out of sync). They are copy/reveal
@@ -54,8 +69,12 @@ automatically on every page.
   `netbanking`, `demat`, or `govid` item shows the target domain and requires explicit
   confirmation before proceeding.
 - **No hidden-field fill**: the injected fill script (`src/lib/fillLogic.ts`) only fills
-  visible fields (`display`/`visibility`/`opacity` checks) — a hidden honeypot field used by
-  some sites to trip up naive autofillers is skipped.
+  visible fields. The visibility predicate rejects `type=hidden`, `display:none`,
+  `visibility:hidden`, `opacity:0`, `aria-hidden` on the element or any ancestor, elements
+  with no layout boxes, boxes smaller than 10×10 px, and boxes positioned far outside the
+  document/viewport — the usual honeypot-hiding tricks. When the password field sits inside a
+  `<form>`, the username is filled within that SAME form only (a decoy form elsewhere on the
+  page cannot soak up half the credentials).
 - **Top frame only**: fills use `allFrames: false` at the injection call site, and the fill
   script itself refuses to run if `window.top !== window` as a second, independent check.
 - **No decrypted sensitive values reach the popup at rest.** `GET_ITEM` redacts every
@@ -79,7 +98,10 @@ gesture the popup already has) and asks the background worker to schedule a clea
   `setTimeout` to clear the clipboard if it is *still open* when the timer elapses, but if the
   user closes the popup before that, **the clipboard is only cleared the next time the popup
   is opened** (not after a fixed number of seconds in the background). This is a known,
-  documented limitation for Firefox in this V1 — not silently swallowed.
+  documented limitation for Firefox in this V1 — not silently swallowed. Because of it, the
+  popup shows an explicit warning (with a "Copy anyway" confirmation) before copying any
+  *sensitive* field value on browsers without background clipboard clearing, telling the user
+  the clipboard cannot be auto-cleared until the popup reopens.
 
 ## Manifest differences (Chrome/Edge vs Firefox)
 
@@ -167,7 +189,9 @@ npm run test --workspace @pw/extension        # vitest — pure-logic unit tests
   extension after inactivity") — nothing sensitive is lost, you just re-enter the master
   password.
 - **Clipboard auto-clear on Firefox** only guarantees a clear on next popup open if the popup
-  was already closed when the timer elapsed (see "Clipboard auto-clear" above).
+  was already closed when the timer elapsed (see "Clipboard auto-clear" above). The popup
+  therefore warns — and requires a "Copy anyway" confirmation — before copying a sensitive
+  field value on browsers without background clipboard clearing.
 - **"Save login for this site"** does not scrape the page's actual form; it prefills the
   title/URL from the active tab and expects the user to type or generate the credential. Full
   form-capture autofill is V2 ("Full browser autofill").

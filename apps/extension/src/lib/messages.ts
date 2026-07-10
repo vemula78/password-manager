@@ -9,6 +9,9 @@ export interface VaultStatus {
   integrityWarnings: string[];
   autoLockMinutes: number;
   clipboardClearSeconds: number;
+  /** False on Firefox (no chrome.offscreen): after the popup closes, the clipboard can only
+   * be cleared on the popup's NEXT open — the popup must warn before sensitive copies. */
+  canBackgroundClearClipboard: boolean;
 }
 
 /** Metadata-safe projection of a VaultItem for list/search UI — sensitive field VALUES are
@@ -40,7 +43,12 @@ export type Req =
       username: string;
       password: string;
     }
-  | { kind: "FILL_ACTIVE_TAB"; id: string; tabId: number; pageUrl: string; confirmed: boolean }
+  /**
+   * expectedHost = the host the popup DISPLAYED to the user (and that any confirmation was
+   * given for). The background never fills based on it — it re-fetches the tab's URL at fill
+   * time and aborts if the live host no longer equals expectedHost (TOCTOU guard).
+   */
+  | { kind: "FILL_ACTIVE_TAB"; id: string; tabId: number; expectedHost: string; confirmed: boolean }
   | { kind: "UPDATE_SETTINGS"; autoLockMinutes?: number; clipboardClearSeconds?: number }
   | { kind: "NOTE_ACTIVITY" } // popup pings this so the idle timer resets on real usage
   | { kind: "SCHEDULE_CLIPBOARD_CLEAR"; seconds: number }; // popup wrote to the clipboard itself

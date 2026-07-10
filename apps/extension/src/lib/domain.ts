@@ -28,16 +28,21 @@ function stripWww(host: string): string {
 export type HostMatch = "exact" | "subdomain" | "mismatch";
 
 /**
- * Compare the active tab's host against an item's stored host.
+ * Compare the active tab's host against an item's stored host. Deliberately ASYMMETRIC:
  * - "exact": same host (ignoring a leading www.)
- * - "subdomain": one is a subdomain of the other (e.g. netbanking.sbi.co.in vs sbi.co.in)
- * - "mismatch": unrelated hosts — fill must be blocked pending explicit confirmation.
+ * - "subdomain": the ACTIVE host is a subdomain of the STORED host
+ *   (e.g. item saved for sbi.co.in also matches netbanking.sbi.co.in)
+ * - "mismatch": everything else — including the PARENT direction: an item saved for
+ *   login.example.com must NOT silently fill on example.com. Without a public-suffix list we
+ *   cannot tell a registrable domain from a shared parent (an item saved for
+ *   mysite.github.io must never silently fill on github.io), so parent-direction fills go
+ *   through the explicit mismatch-confirmation path instead of a silent fill.
  */
 export function compareHosts(activeHost: string, storedHost: string): HostMatch {
   const a = stripWww(activeHost.toLowerCase());
   const b = stripWww(storedHost.toLowerCase());
   if (a === b) return "exact";
-  if (a.endsWith(`.${b}`) || b.endsWith(`.${a}`)) return "subdomain";
+  if (a.endsWith(`.${b}`)) return "subdomain";
   return "mismatch";
 }
 

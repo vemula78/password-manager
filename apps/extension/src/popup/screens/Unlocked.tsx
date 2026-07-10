@@ -92,6 +92,7 @@ export function Unlocked(props: {
                   summary={s}
                   activeTab={props.activeTab}
                   clipboardClearSeconds={props.status.clipboardClearSeconds}
+                  canBackgroundClearClipboard={props.status.canBackgroundClearClipboard}
                 />
               ))}
             </div>

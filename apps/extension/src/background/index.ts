@@ -25,7 +25,12 @@ import {
   savePrefs,
 } from "../lib/extStorage";
 import { fillableFieldsFor } from "../lib/fillableFields";
-import { evaluateFillSafety } from "../lib/domain";
+import { evaluateFillSafety, extractHost } from "../lib/domain";
+import {
+  clampAutoLockMinutes,
+  isValidAutoLockMinutes,
+  isValidClipboardClearSeconds,
+} from "../lib/bounds";
 import { isFillRefusedField, requiresPerFillConfirmation } from "../lib/sensitiveFields";
 import type { ItemSummary, Req, Res, VaultStatus } from "../lib/messages";
 import { TEMPLATES } from "@pw/core";
@@ -50,9 +55,9 @@ function broadcast(kind: "LOCKED" | "UNLOCKED"): void {
 async function scheduleAutoLock(): Promise<void> {
   const prefs = await loadPrefs();
   chrome.alarms.clear(ALARM_AUTO_LOCK);
-  if (prefs.autoLockMinutes > 0) {
-    chrome.alarms.create(ALARM_AUTO_LOCK, { delayInMinutes: prefs.autoLockMinutes });
-  }
+  // clampAutoLockMinutes: an imported vault may carry an out-of-range value (e.g. the web
+  // app's "0 = never") — the extension always locks after a bounded idle period.
+  chrome.alarms.create(ALARM_AUTO_LOCK, { delayInMinutes: clampAutoLockMinutes(prefs.autoLockMinutes) });
 }
 
 function lock(): void {
@@ -153,8 +158,9 @@ async function status(): Promise<VaultStatus> {
     hasVault: !!blob,
     unlocked: !!store,
     integrityWarnings: store?.getIntegrityWarnings() ?? [],
-    autoLockMinutes: store?.settings.autoLockMinutes ?? prefs.autoLockMinutes,
+    autoLockMinutes: clampAutoLockMinutes(store?.settings.autoLockMinutes ?? prefs.autoLockMinutes),
     clipboardClearSeconds: store?.settings.clipboardClearSeconds ?? prefs.clipboardClearSeconds,
+    canBackgroundClearClipboard: hasOffscreenSupport(),
   };
 }
 
@@ -278,16 +284,35 @@ async function handle(req: Req): Promise<Res> {
         return { ok: false, error: "This field cannot be auto-filled. Use copy or reveal instead." };
       }
 
+      // TOCTOU guard: never trust the popup's snapshot of the tab or its URL — the tab can
+      // navigate (or be swapped) between popup-open and the Fill click, and between a warning
+      // and its "Fill anyway" confirmation. Fetch the tab NOW, require it to still be the
+      // active tab of the current window, and evaluate every safety rule against its URL at
+      // this instant. This block re-runs in full on the post-confirmation call too.
+      const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
+      if (!activeTab || activeTab.id !== req.tabId) {
+        return { ok: false, error: "The target tab is no longer the active tab. Fill cancelled." };
+      }
+      const pageUrl = activeTab.url ?? "";
+      const pageHost = extractHost(pageUrl);
+      if (!pageHost) {
+        return { ok: false, error: "Cannot determine this page's address. Fill cancelled." };
+      }
+      if (pageHost !== req.expectedHost.trim().toLowerCase()) {
+        return {
+          ok: false,
+          error: `This page changed to ${pageHost} after the popup opened. Fill cancelled — close and reopen the popup to continue.`,
+        };
+      }
+
       const bankingConfirmNeeded = requiresPerFillConfirmation(item.type) && !req.confirmed;
-      const safety = evaluateFillSafety(req.pageUrl, item.fields.url ?? item.fields.portalUrl ?? "");
+      const safety = evaluateFillSafety(pageUrl, item.fields.url ?? item.fields.portalUrl ?? "");
       const needsConfirm = bankingConfirmNeeded || (safety.requiresConfirmation && !req.confirmed);
       if (needsConfirm) {
         const reasons = [...safety.reasons];
         if (bankingConfirmNeeded) {
           reasons.unshift(
-            `"${item.title}" is a banking/government item. Confirm you want to fill credentials on ${
-              new URL(req.pageUrl).hostname
-            }.`,
+            `"${item.title}" is a banking/government item. Confirm you want to fill credentials on ${pageHost}.`,
           );
         }
         return { ok: true, fillWarning: { requiresConfirmation: true, reasons } };
@@ -320,6 +345,17 @@ async function handle(req: Req): Promise<Res> {
 
     case "UPDATE_SETTINGS": {
       if (!store) return { ok: false, error: "Vault is locked." };
+      // Bounds enforced HERE, not just in the Settings UI. No "0 = never": the extension
+      // always auto-locks within a bounded idle period (1–240 minutes).
+      if (req.autoLockMinutes !== undefined && !isValidAutoLockMinutes(req.autoLockMinutes)) {
+        return { ok: false, error: "Auto-lock must be a whole number of minutes between 1 and 240." };
+      }
+      if (
+        req.clipboardClearSeconds !== undefined &&
+        !isValidClipboardClearSeconds(req.clipboardClearSeconds)
+      ) {
+        return { ok: false, error: "Clipboard clear must be a whole number of seconds between 5 and 300." };
+      }
       await store.updateSettings({
         ...(req.autoLockMinutes !== undefined ? { autoLockMinutes: req.autoLockMinutes } : {}),
         ...(req.clipboardClearSeconds !== undefined
@@ -339,7 +375,45 @@ async function handle(req: Req): Promise<Res> {
   }
 }
 
-chrome.runtime.onMessage.addListener((req: Req, _sender, sendResponse) => {
+/** Requests that touch vault contents or drive a fill — only the extension's own popup may
+ * send these. Everything else (STATUS/NOTE_ACTIVITY/LOCK_NOW/SCHEDULE_CLIPBOARD_CLEAR) is
+ * still restricted to this extension's own pages, just not popup-specifically. */
+const POPUP_ONLY_KINDS: ReadonlySet<Req["kind"]> = new Set([
+  "UNLOCK",
+  "IMPORT_BACKUP",
+  "LIST_ITEMS",
+  "GET_ITEM",
+  "REVEAL_FIELD",
+  "TOUCH_USED",
+  "SAVE_LOGIN",
+  "UPDATE_SETTINGS",
+  "FILL_ACTIVE_TAB",
+]);
+
+/**
+ * Sender gate. Messages must originate from THIS extension (sender.id), and from one of its
+ * own extension pages (sender.url under chrome.runtime.getURL("")) — content scripts run in
+ * web pages, so their sender.url is the page URL and they are rejected outright: there are
+ * deliberately no content-script-initiated messages in this design (the content script only
+ * ever REPLIES to a tabs.sendMessage from the background). Privileged kinds additionally
+ * require the popup page itself.
+ */
+function senderAllowed(req: Req, sender: chrome.runtime.MessageSender): boolean {
+  if (sender.id !== chrome.runtime.id) return false;
+  const url = sender.url ?? "";
+  if (!url.startsWith(chrome.runtime.getURL(""))) return false; // rejects all web-page senders
+  if (POPUP_ONLY_KINDS.has(req.kind)) {
+    return url.startsWith(chrome.runtime.getURL("popup.html"));
+  }
+  return true;
+}
+
+chrome.runtime.onMessage.addListener((req: Req, sender, sendResponse) => {
+  if (!req || typeof req.kind !== "string") return; // not ours (e.g. offscreen protocol)
+  if (!senderAllowed(req, sender)) {
+    sendResponse({ ok: false, error: "Request rejected: unauthorized sender." });
+    return;
+  }
   handle(req)
     .then(sendResponse)
     .catch((e) => sendResponse({ ok: false, error: e instanceof Error ? e.message : String(e) }));

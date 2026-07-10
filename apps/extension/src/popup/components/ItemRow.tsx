@@ -13,6 +13,9 @@ export function ItemRow(props: {
   summary: ItemSummary;
   activeTab: chrome.tabs.Tab | null;
   clipboardClearSeconds: number;
+  /** False on Firefox (no offscreen doc): the clipboard cannot be auto-cleared after the
+   * popup closes — sensitive copies must warn first (see clipboardCopyWarning below). */
+  canBackgroundClearClipboard: boolean;
 }) {
   const [open, setOpen] = useState(false);
   const [item, setItem] = useState<VaultItem | null>(null);
@@ -21,6 +24,8 @@ export function ItemRow(props: {
   const [revealFieldKey, setRevealFieldKey] = useState<string | null>(null);
   const [revealedValues, setRevealedValues] = useState<Record<string, string>>({});
   const [fillConfirm, setFillConfirm] = useState<string[] | null>(null);
+  /** Field key of a pending sensitive copy awaiting the Firefox clipboard warning. */
+  const [pendingSensitiveCopy, setPendingSensitiveCopy] = useState<string | null>(null);
 
   const tpl = TEMPLATES[props.summary.type];
 
@@ -44,12 +49,23 @@ export function ItemRow(props: {
     }
   };
 
-  const copyField = async (fieldKey: string, sensitive: boolean) => {
-    if (!sensitive) {
-      await copyWithAutoClear(item?.fields[fieldKey] ?? "", props.clipboardClearSeconds);
+  /** Copy a NON-sensitive field's stored value. */
+  const copyPlainField = async (fieldKey: string) => {
+    await copyWithAutoClear(item?.fields[fieldKey] ?? "", props.clipboardClearSeconds);
+  };
+
+  /** Copy an already-revealed SENSITIVE value. On browsers without background clipboard
+   * clearing (Firefox), interpose a warning first — the clipboard would otherwise hold the
+   * secret until the popup is next opened. */
+  const copySensitiveValue = async (fieldKey: string) => {
+    const value = revealedValues[fieldKey];
+    if (value === undefined) return;
+    if (!props.canBackgroundClearClipboard && pendingSensitiveCopy !== fieldKey) {
+      setPendingSensitiveCopy(fieldKey); // shows the warning + "Copy anyway" button
       return;
     }
-    setRevealFieldKey(fieldKey); // opens the reauth dialog; copy happens on confirm
+    setPendingSensitiveCopy(null);
+    await copyWithAutoClear(value, props.clipboardClearSeconds);
   };
 
   const revealField = async (fieldKey: string) => {
@@ -57,7 +73,8 @@ export function ItemRow(props: {
   };
 
   const doFill = async (confirmed: boolean) => {
-    if (!props.activeTab?.id || !props.activeTab.url) return;
+    const shownHost = props.activeTab?.url ? safeHost(props.activeTab.url) : null;
+    if (!props.activeTab?.id || !shownHost) return;
     setErr("");
     const res = await call<
       | { ok: true; fillWarning: { requiresConfirmation: boolean; reasons: string[] } | null }
@@ -67,7 +84,9 @@ export function ItemRow(props: {
       kind: "FILL_ACTIVE_TAB",
       id: props.summary.id,
       tabId: props.activeTab.id,
-      pageUrl: props.activeTab.url,
+      // The host this popup DISPLAYED (and any confirmation was given for). The background
+      // re-reads the tab's live URL itself and aborts if it no longer matches this.
+      expectedHost: shownHost,
       confirmed,
     });
     if (!res.ok) {
@@ -135,8 +154,8 @@ export function ItemRow(props: {
                 <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
                   <code style={{ flex: 1, wordBreak: "break-all" }}>{display}</code>
                   {f.sensitive ? (
-                    revealed ? (
-                      <button className="link-btn" onClick={() => void copyField(f.key, false)}>
+                    revealed !== undefined ? (
+                      <button className="link-btn" onClick={() => void copySensitiveValue(f.key)}>
                         copy
                       </button>
                     ) : (
@@ -146,12 +165,25 @@ export function ItemRow(props: {
                     )
                   ) : (
                     rawValue && (
-                      <button className="link-btn" onClick={() => void copyField(f.key, false)}>
+                      <button className="link-btn" onClick={() => void copyPlainField(f.key)}>
                         copy
                       </button>
                     )
                   )}
                 </div>
+                {pendingSensitiveCopy === f.key && (
+                  <div className="warning-box">
+                    ⚠️ On this browser the clipboard cannot be cleared automatically after the
+                    popup closes — it will only be cleared the next time you open this popup.
+                    Paste the value promptly, then copy something harmless over it.{" "}
+                    <button className="link-btn" onClick={() => void copySensitiveValue(f.key)}>
+                      Copy anyway
+                    </button>{" "}
+                    <button className="link-btn" onClick={() => setPendingSensitiveCopy(null)}>
+                      Cancel
+                    </button>
+                  </div>
+                )}
                 {f.warning && <div className="muted">{f.warning}</div>}
               </div>
             );
