@@ -78,7 +78,8 @@ export type AuditEventType =
   | "failed_unlock"
   | "emergency_kit_exported"
   | "history_cleared"
-  | "items_imported";
+  | "items_imported"
+  | "autofill_used";
 
 export interface AuditEvent {
   at: string;

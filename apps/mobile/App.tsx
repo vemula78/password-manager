@@ -5,7 +5,7 @@
 // NOTE: this app requires a DEV BUILD (expo-dev-client / `npx expo run:ios|android`) —
 // react-native-libsodium ships native code and does not run in Expo Go.
 import React, { useState } from "react";
-import { ActivityIndicator, View } from "react-native";
+import { ActivityIndicator, Text, View } from "react-native";
 import { StatusBar } from "expo-status-bar";
 import { NavigationContainer } from "@react-navigation/native";
 import { createNativeStackNavigator } from "@react-navigation/native-stack";
@@ -28,13 +28,26 @@ import type { RootStackParamList } from "./src/nav";
 const Stack = createNativeStackNavigator<RootStackParamList>();
 
 function Root() {
-  const { status, refresh } = useVault();
+  const { status, errorMessage, refresh } = useVault();
   const [lockedView, setLockedView] = useState<"unlock" | "recover" | "restore">("unlock");
 
   if (status === "loading") {
     return (
       <View style={{ flex: 1, backgroundColor: colors.bg, justifyContent: "center" }}>
         <ActivityIndicator color={colors.primary} size="large" />
+      </View>
+    );
+  }
+
+  if (status === "error") {
+    return (
+      <View style={{ flex: 1, backgroundColor: colors.bg, justifyContent: "center", padding: 24 }}>
+        <Text style={{ color: colors.text, fontSize: 18, fontWeight: "700", marginBottom: 8 }}>
+          Vault unavailable
+        </Text>
+        <Text style={{ color: colors.subtext }}>
+          {errorMessage ?? "Vault storage is misconfigured — reinstall the app."}
+        </Text>
       </View>
     );
   }

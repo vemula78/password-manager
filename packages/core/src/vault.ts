@@ -177,6 +177,17 @@ export class VaultStore {
     return this.keys.bk;
   }
 
+  /**
+   * Exposed so a caller can share the already-derived Vault Key with a trusted, platform-gated
+   * store outside core — e.g. apps/mobile's biometric.ts writes this into a Face ID/passcode-
+   * protected shared Keychain item (App Group access group) so the iOS AutoFill credential
+   * provider extension can decrypt items without re-deriving the KEK. No encryption/decryption
+   * logic changes here; this only exposes existing key material, mirroring getBackupKey().
+   */
+  getVaultKey(): Uint8Array {
+    return this.keys.vk;
+  }
+
   lock(): void {
     wipe(this.keys.vk);
     wipe(this.keys.bk);

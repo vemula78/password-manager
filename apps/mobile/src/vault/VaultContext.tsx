@@ -29,17 +29,22 @@ import {
 import {
   biometricsAvailable,
   clearStoredMasterPassword,
+  deleteSharedVaultKey,
   promptBiometric,
   readMasterPassword,
   storeMasterPassword,
+  storeSharedVaultKey,
 } from "../security/biometric";
+import { syncCredentialIdentities, clearCredentialIdentities } from "../security/identitySync";
 import { Button, Field } from "../components/ui";
 import { colors, spacing } from "../theme";
 
-export type VaultStatus = "loading" | "none" | "locked" | "unlocked";
+export type VaultStatus = "loading" | "none" | "locked" | "unlocked" | "error";
 
 interface VaultContextValue {
   status: VaultStatus;
+  /** Set when status === "error" (e.g. a misconfigured build can't resolve vault storage). */
+  errorMessage: string | null;
   store: VaultStore | null;
   /** Bumps on every mutation so screens re-render. */
   tick: number;
@@ -77,6 +82,7 @@ export function useStore(): VaultStore {
 
 export function VaultProvider({ children }: { children: React.ReactNode }) {
   const [status, setStatus] = useState<VaultStatus>("loading");
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [store, setStore] = useState<VaultStore | null>(null);
   const [tick, setTick] = useState(0);
   const [prefs, setPrefsState] = useState<DevicePrefs>(readPrefs);
@@ -90,9 +96,27 @@ export function VaultProvider({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     void (async () => {
       await initSodium();
-      setStatus(vaultExists() ? "locked" : "none");
+      try {
+        setStatus(vaultExists() ? "locked" : "none");
+      } catch (e) {
+        // e.g. VaultStorageUnavailableError on iOS — a misconfigured build can't resolve the
+        // App Group container. Surface loudly rather than silently falling back to stale data.
+        setErrorMessage(e instanceof Error ? e.message : "Vault storage is unavailable.");
+        setStatus("error");
+      }
     })();
   }, []);
+
+  // iOS QuickType bar sync: re-populate ASCredentialIdentityStore whenever the unlocked store
+  // changes (fresh unlock/create/restore) or the item list changes (every add/edit/delete/
+  // archive calls refresh(), which bumps `tick`). Only runs when the user has actually opted
+  // into biometrics/AutoFill — see identitySync.ts and disableBiometrics below for the
+  // opt-out/clear path. No-op on Android/web.
+  useEffect(() => {
+    if (status === "unlocked" && store && prefs.biometricEnabled === true) {
+      void syncCredentialIdentities(store);
+    }
+  }, [status, store, tick, prefs.biometricEnabled]);
 
   const lock = useCallback(() => {
     setStore((s) => {
@@ -165,8 +189,11 @@ export function VaultProvider({ children }: { children: React.ReactNode }) {
       return true;
     } catch (e) {
       if (e instanceof WrongCredentialError) {
-        // Master password changed elsewhere — stored credential is stale. Remove it.
+        // Master password changed elsewhere — stored credential is stale. Remove it, and also
+        // revoke the shared Keychain Vault Key so AutoFill access is revoked too, not just the
+        // main app's biometric unlock (a stale-credential situation is a revocation situation).
         await clearStoredMasterPassword();
+        await deleteSharedVaultKey();
         setPrefs({ biometricEnabled: false });
       }
       return false;
@@ -184,13 +211,25 @@ export function VaultProvider({ children }: { children: React.ReactNode }) {
   const enableBiometrics = useCallback(
     async (masterPassword: string) => {
       await storeMasterPassword(masterPassword);
+      // iOS only: also mirror the already-derived Vault Key into the shared, Face ID/passcode-
+      // gated Keychain item so the AutoFill credentials-provider extension can decrypt items
+      // without needing the master password. `store` is guaranteed non-null at every call site
+      // (right after an unlock, or from a screen that requires an unlocked vault).
+      if (store) await storeSharedVaultKey(store.getVaultKey());
       setPrefs({ biometricEnabled: true });
     },
-    [setPrefs],
+    [setPrefs, store],
   );
 
   const disableBiometrics = useCallback(async () => {
+    // Order matters: only record biometricEnabled: false once the shared Keychain Vault Key
+    // (AutoFill's access) and the local master-password credential are actually gone. If
+    // deleteSharedVaultKey throws (a real Keychain failure, not swallowed anymore — see
+    // biometric.ts), let it propagate rather than silently marking biometrics disabled while
+    // AutoFill can still decrypt the vault.
+    await deleteSharedVaultKey();
     await clearStoredMasterPassword();
+    await clearCredentialIdentities();
     setPrefs({ biometricEnabled: false });
   }, [setPrefs]);
 
@@ -254,6 +293,7 @@ export function VaultProvider({ children }: { children: React.ReactNode }) {
   const value = useMemo<VaultContextValue>(
     () => ({
       status,
+      errorMessage,
       store,
       tick,
       refresh,
@@ -270,7 +310,7 @@ export function VaultProvider({ children }: { children: React.ReactNode }) {
       reauth,
       reauthPassword,
     }),
-    [status, store, tick, refresh, prefs, setPrefs, createVault, unlockWithPassword,
+    [status, errorMessage, store, tick, refresh, prefs, setPrefs, createVault, unlockWithPassword,
      unlockWithRecoveryKey, unlockWithBiometrics, lock, adoptStore, enableBiometrics,
      disableBiometrics, reauth, reauthPassword],
   );

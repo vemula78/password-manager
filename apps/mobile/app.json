@@ -11,6 +11,10 @@
       "bundleIdentifier": "org.pwmanager.vault",
       "infoPlist": {
         "NSFaceIDUsageDescription": "Face ID is used to unlock your vault and to reveal or copy sensitive fields."
+      },
+      "entitlements": {
+        "com.apple.security.application-groups": ["group.org.pwmanager.vault"],
+        "com.apple.developer.authentication-services.autofill-credential-provider": true
       }
     },
     "android": {
@@ -35,7 +39,8 @@
         {
           "faceIDPermission": "Face ID is used to unlock your vault and to reveal or copy sensitive fields."
         }
-      ]
+      ],
+      "@bacons/apple-targets"
     ]
   }
 }

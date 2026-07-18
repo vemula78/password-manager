@@ -10,10 +10,18 @@
 //      key hierarchy are untouched — biometrics only gate access to the cached credential.
 //   4. Disabling the toggle deletes the SecureStore entry; nothing else needs rotating.
 //
-// The vault keys themselves are never stored — only the master password, behind the
-// platform biometric gate.
+// The vault keys themselves are never stored on their own — only the master password, behind
+// the platform biometric gate — EXCEPT on iOS, where enabling biometrics ALSO writes the raw
+// Vault Key (VK) into a separate, Face ID/passcode-gated Keychain item in the shared App Group
+// access group (see modules/shared-vault-store). That is what lets the credentials-provider
+// AutoFill extension — a different OS process, with no access to expo-secure-store's
+// app-private Keychain item — decrypt items after its own biometric prompt, without needing the
+// master password at all. Nothing about the KEK/VK/BK hierarchy or ciphertext format changes;
+// this only mirrors already-derived key material into a second, equally biometric-gated home.
 import * as SecureStore from "expo-secure-store";
 import * as LocalAuthentication from "expo-local-authentication";
+import { Platform } from "react-native";
+import SharedVaultStore from "../../modules/shared-vault-store/src/SharedVaultStoreModule";
 
 const MASTER_PW_KEY = "pwm.master_password";
 
@@ -63,4 +71,42 @@ export async function clearStoredMasterPassword(): Promise<void> {
   } catch {
     // already gone
   }
+}
+
+// ---- iOS-only: shared Vault Key for the AutoFill credential provider extension ------------
+//
+// toB64 uses libsodium's ORIGINAL (standard, padded) base64 variant — the same encoding
+// swift-sodium / Foundation's `Data(base64Encoded:)` expect, so no re-encoding is needed on
+// the Swift side.
+import { toB64 } from "@pw/core";
+
+/**
+ * Mirror the Vault Key into the shared, Face ID/passcode-gated Keychain item so the
+ * credentials-provider extension can decrypt items on its own. No-op on Android (no AutoFill
+ * provider integration there) and swallows errors from environments without the native module
+ * (e.g. Expo Go) — biometric unlock of the main app still works either way.
+ *
+ * IMPORTANT: `vk` here is expected to be the SAME Uint8Array reference VaultStore.getVaultKey()
+ * returns, i.e. the live key VaultStore uses for every encrypt/decrypt. Do NOT wipe() it here —
+ * that would zero the vault's in-memory key out from under it. Only VaultStore.lock() may wipe
+ * this array.
+ */
+export async function storeSharedVaultKey(vk: Uint8Array): Promise<void> {
+  if (Platform.OS !== "ios") return;
+  const b64 = toB64(vk);
+  await SharedVaultStore.storeSharedVaultKey(b64);
+}
+
+/**
+ * Delete the shared Keychain vault-key item. Called whenever biometrics are disabled (or a
+ * stale-credential situation revokes them — see VaultContext.tsx's unlockWithBiometrics).
+ *
+ * Does NOT swallow errors: a failed Keychain delete means AutoFill access was NOT actually
+ * revoked, so callers (VaultContext.tsx's disableBiometrics) must see the failure and avoid
+ * recording biometricEnabled: false as if revocation succeeded. This mirrors
+ * storeSharedVaultKey above, which also lets native errors propagate.
+ */
+export async function deleteSharedVaultKey(): Promise<void> {
+  if (Platform.OS !== "ios") return;
+  await SharedVaultStore.deleteSharedVaultKey();
 }
