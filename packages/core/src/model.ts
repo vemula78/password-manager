@@ -77,7 +77,8 @@ export type AuditEventType =
   | "master_password_changed"
   | "failed_unlock"
   | "emergency_kit_exported"
-  | "history_cleared";
+  | "history_cleared"
+  | "items_imported";
 
 export interface AuditEvent {
   at: string;

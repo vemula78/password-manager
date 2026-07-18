@@ -1,7 +1,8 @@
 // Settings: change master password, rotate recovery key / reprint emergency kit,
-// clipboard & auto-lock timers, kit contact details, activity history, lock now.
-import { verifyMasterPassword, type EmergencyKit } from "@pw/core";
-import { useMemo, useState } from "react";
+// clipboard & auto-lock timers, kit contact details, activity history, lock now,
+// import logins from a CSV export (Apple Passwords, Chrome, generic).
+import { parseCsvToLoginItems, verifyMasterPassword, type EmergencyKit, type ImportedLoginRow } from "@pw/core";
+import { useMemo, useRef, useState } from "react";
 import { KitOverlay, kitFromStore } from "../components/Kit";
 import { formatDateTime, Modal, StrengthMeter, Warning } from "../components/ui";
 import { useApp } from "../ctx";
@@ -159,6 +160,21 @@ export function Settings() {
         )}
       </div>
 
+      <div className="card">
+        <h3>Import logins</h3>
+        <p className="muted">
+          Import a CSV export from Apple Passwords, Chrome, or another password manager.
+          Each row becomes a Login item — nothing is uploaded anywhere, the file is read
+          only in this browser tab.
+        </p>
+        <Warning>
+          The export file itself is <strong>plain, unencrypted text</strong> containing your
+          real passwords. Delete it from your device (and Downloads folder) once the import
+          below is done.
+        </Warning>
+        <ImportCsv />
+      </div>
+
       {showChangePwd && <ChangePasswordModal onClose={() => setShowChangePwd(false)} />}
 
       {kit && (
@@ -169,6 +185,112 @@ export function Settings() {
         />
       )}
     </div>
+  );
+}
+
+function ImportCsv() {
+  const app = useApp();
+  const { store } = app;
+  const fileRef = useRef<HTMLInputElement>(null);
+  const [pending, setPending] = useState<{ fileName: string; rows: ImportedLoginRow[]; skipped: number; truncated: boolean } | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+
+  const onFile = async (file: File) => {
+    setErr("");
+    setPending(null);
+    try {
+      const text = await file.text();
+      const { items, skipped, truncated } = parseCsvToLoginItems(text);
+      if (items.length === 0) {
+        setErr("No importable rows found. Expected columns like Title/URL/Username/Password.");
+        return;
+      }
+      setPending({ fileName: file.name, rows: items, skipped, truncated });
+    } catch {
+      setErr("Could not read that file as CSV.");
+    } finally {
+      if (fileRef.current) fileRef.current.value = "";
+    }
+  };
+
+  const confirmImport = async () => {
+    if (!pending) return;
+    setBusy(true);
+    try {
+      for (const row of pending.rows) {
+        await store.addItem({
+          type: "login",
+          title: row.title,
+          fields: row.fields,
+          notes: row.notes,
+          customFields: row.otpauth
+            ? [{ label: "TOTP secret (otpauth URI)", value: row.otpauth, sensitive: true }]
+            : [],
+        });
+      }
+      await store.logAndPersist("items_imported", `${pending.rows.length} items from CSV`);
+      app.refresh();
+      app.toast(`Imported ${pending.rows.length} item${pending.rows.length === 1 ? "" : "s"}`, "success");
+      setPending(null);
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <>
+      <div className="btn-row">
+        <input
+          ref={fileRef}
+          type="file"
+          accept=".csv,text/csv"
+          style={{ display: "none" }}
+          onChange={(e) => {
+            const f = e.target.files?.[0];
+            if (f) void onFile(f);
+          }}
+        />
+        <button className="btn" onClick={() => fileRef.current?.click()}>
+          Choose CSV file…
+        </button>
+      </div>
+      {err && <p className="error">{err}</p>}
+
+      {pending && (
+        <Modal title={`Import from ${pending.fileName}`} onClose={() => setPending(null)}>
+          <p>
+            Found <strong>{pending.rows.length}</strong> login
+            {pending.rows.length === 1 ? "" : "s"} to import
+            {pending.skipped > 0 ? ` (${pending.skipped} blank/empty row${pending.skipped === 1 ? "" : "s"} skipped)` : ""}.
+          </p>
+          {pending.truncated && (
+            <Warning>This file has more rows than fit in one import; only the first rows shown were included.</Warning>
+          )}
+          <div className="audit-list">
+            {pending.rows.slice(0, 20).map((r, i) => (
+              <div className="list-row static" key={i}>
+                <span>{r.title}</span>
+                <span className="muted">{r.fields.username ?? ""}</span>
+              </div>
+            ))}
+            {pending.rows.length > 20 && (
+              <p className="muted small">…and {pending.rows.length - 20} more.</p>
+            )}
+          </div>
+          <div className="btn-row">
+            <button className="btn" onClick={() => setPending(null)} disabled={busy}>
+              Cancel
+            </button>
+            <button className="btn primary" onClick={() => void confirmImport()} disabled={busy}>
+              {busy ? "Importing…" : `Import ${pending.rows.length} item${pending.rows.length === 1 ? "" : "s"}`}
+            </button>
+          </div>
+        </Modal>
+      )}
+    </>
   );
 }
 
