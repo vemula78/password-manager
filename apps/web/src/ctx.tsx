@@ -23,6 +23,7 @@ import { type AppConfig, loadConfig, saveConfig } from "./lib/config";
 
 export type CategoryKey =
   | "all"
+  | "logins"
   | "banking"
   | "cards"
   | "upi"
@@ -33,6 +34,7 @@ export type CategoryKey =
 
 export const CATEGORIES: Record<CategoryKey, { label: string; icon: string; types: ItemType[] | null }> = {
   all: { label: "All items", icon: "🗄️", types: null },
+  logins: { label: "Logins", icon: "🔑", types: ["login"] },
   banking: { label: "Banking", icon: "🏦", types: ["netbanking", "demat"] },
   cards: { label: "Cards", icon: "💳", types: ["card"] },
   upi: { label: "UPI", icon: "📲", types: ["upi"] },

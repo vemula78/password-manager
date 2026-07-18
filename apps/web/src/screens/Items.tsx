@@ -10,7 +10,7 @@ import {
   type Reminder,
   type VaultItem,
 } from "@pw/core";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { GeneratorPanel } from "../components/GeneratorPanel";
 import { formatDate, formatDateTime, Modal, Warning } from "../components/ui";
 import { CATEGORIES, useApp } from "../ctx";
@@ -27,12 +27,20 @@ export function Items() {
   const [addType, setAddType] = useState<ItemType | null>(null);
   const [editItem, setEditItem] = useState<VaultItem | null>(null);
   const [pickType, setPickType] = useState(false);
+  const detailRef = useRef<HTMLDivElement>(null);
 
   // Honour deep-links from dashboard (open item / quick add).
   useEffect(() => {
     if (route.itemId) setSelId(route.itemId);
     if (route.addType) setAddType(route.addType);
   }, [route.itemId, route.addType]);
+
+  // Below ~860px the list and detail panes stack vertically (see styles.css), so opening
+  // an item renders its detail below the whole list — scroll it into view or it looks like
+  // nothing happened until the user scrolls all the way down past the list.
+  useEffect(() => {
+    if (selId) detailRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+  }, [selId]);
 
   const items = useMemo(() => {
     let list = query.trim()
@@ -125,7 +133,7 @@ export function Items() {
         </div>
       </div>
 
-      <div className="items-detail-pane">
+      <div className="items-detail-pane" ref={detailRef}>
         {selected ? (
           <ItemDetail
             item={selected}
