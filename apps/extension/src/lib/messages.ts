@@ -2,6 +2,18 @@
 // VaultStore in memory — see README.md "Architecture" for why). Every message is a plain,
 // JSON-serializable object; chrome.runtime.sendMessage/onMessage carries these directly.
 import type { ItemType, VaultItem } from "@pw/core";
+import type { SyncConfig } from "./syncConfig";
+
+/** UI-facing sync status: config plus the outcome of the most recent cycle. Never carries the
+ * auth token or master password — those never leave the background worker's memory. */
+export interface SyncStatusView {
+  config: SyncConfig;
+  deviceLabel: string;
+  /** True once this session has derived an auth token (i.e. unlocked with sync enabled). */
+  canSync: boolean;
+  busy: boolean;
+  lastConflictCount: number;
+}
 
 export interface VaultStatus {
   hasVault: boolean; // a .pwmbackup has been imported at least once
@@ -51,7 +63,16 @@ export type Req =
   | { kind: "FILL_ACTIVE_TAB"; id: string; tabId: number; expectedHost: string; confirmed: boolean }
   | { kind: "UPDATE_SETTINGS"; autoLockMinutes?: number; clipboardClearSeconds?: number }
   | { kind: "NOTE_ACTIVITY" } // popup pings this so the idle timer resets on real usage
-  | { kind: "SCHEDULE_CLIPBOARD_CLEAR"; seconds: number }; // popup wrote to the clipboard itself
+  | { kind: "SCHEDULE_CLIPBOARD_CLEAR"; seconds: number } // popup wrote to the clipboard itself
+  | { kind: "SYNC_STATUS" }
+  /**
+   * Connect this device to a sync server: creates a new account (accountId omitted) or signs
+   * in to an existing one. masterPassword is verified in the background and used ONLY to
+   * derive the auth token there — it never returns to the popup and is never persisted.
+   */
+  | { kind: "SYNC_CONNECT"; serverUrl: string; accountId: string; masterPassword: string }
+  | { kind: "SYNC_DISABLE" }
+  | { kind: "SYNC_NOW" };
 
 export type Res =
   | { ok: true; status: VaultStatus }
@@ -60,6 +81,7 @@ export type Res =
   | { ok: true; value: string }
   | { ok: true; fillWarning: { requiresConfirmation: boolean; reasons: string[] } | null }
   | { ok: true; fillResult: { filledUsername: boolean; filledPassword: boolean; reason?: string } }
+  | { ok: true; sync: SyncStatusView }
   | { ok: true }
   | { ok: false; error: string; requiresReauth?: boolean };
 

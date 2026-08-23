@@ -21,6 +21,7 @@ import { GeneratorScreen } from "./src/screens/GeneratorScreen";
 import { BackupScreen } from "./src/screens/BackupScreen";
 import { SettingsScreen } from "./src/screens/SettingsScreen";
 import { ActivityScreen } from "./src/screens/ActivityScreen";
+import { SyncScreen } from "./src/screens/SyncScreen";
 import { RestoreVaultView } from "./src/vault/RestoreVaultView";
 import { colors } from "./src/theme";
 import type { RootStackParamList } from "./src/nav";
@@ -86,6 +87,7 @@ function Root() {
         <Stack.Screen name="Backup" component={BackupScreen} options={{ title: "Backup & restore" }} />
         <Stack.Screen name="Settings" component={SettingsScreen} options={{ title: "Settings" }} />
         <Stack.Screen name="Activity" component={ActivityScreen} options={{ title: "Activity history" }} />
+        <Stack.Screen name="Sync" component={SyncScreen} options={{ title: "Sync" }} />
       </Stack.Navigator>
     </NavigationContainer>
   );

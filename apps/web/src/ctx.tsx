@@ -80,6 +80,8 @@ export interface AppCtx {
   navigate(route: Route): void;
   /** Sync auth token derived at unlock; null when sync is off or not yet re-unlocked. */
   authTokenB64: string | null;
+  /** Hand the session a freshly derived auth token (used right after connecting sync). */
+  setAuthToken(token: string): void;
   syncStatus: SyncStatus;
   syncNow(opts?: { silent?: boolean }): Promise<void>;
 }
@@ -97,6 +99,7 @@ const REAUTH_CACHE_MS = 60_000;
 export function AppProvider(props: {
   store: VaultStore;
   authTokenB64: string | null;
+  onAuthToken: (token: string) => void;
   onLock: () => void;
   onReplaceStore: (store: VaultStore) => void;
   children: ReactNode;
@@ -254,10 +257,11 @@ export function AppProvider(props: {
       route,
       navigate,
       authTokenB64: props.authTokenB64,
+      setAuthToken: props.onAuthToken,
       syncStatus,
       syncNow,
     }),
-    [store, rev, refresh, lockNow, requestReauth, copyWithClear, toast, config, updateConfig, route, props.onReplaceStore, props.authTokenB64, syncStatus, syncNow],
+    [store, rev, refresh, lockNow, requestReauth, copyWithClear, toast, config, updateConfig, route, props.onReplaceStore, props.authTokenB64, props.onAuthToken, syncStatus, syncNow],
   );
 
   return (

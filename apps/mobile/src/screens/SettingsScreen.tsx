@@ -179,6 +179,11 @@ export function SettingsScreen({ navigation }: ScreenProps<"Settings">) {
         />
       </Card>
 
+      <SectionTitle>Sync</SectionTitle>
+      <Card>
+        <Button title="Sync across devices" kind="secondary" onPress={() => navigation.navigate("Sync")} />
+      </Card>
+
       <SectionTitle>Activity</SectionTitle>
       <Card>
         <Button title="View activity history" kind="secondary" onPress={() => navigation.navigate("Activity")} />

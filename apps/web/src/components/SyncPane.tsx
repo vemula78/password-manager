@@ -42,7 +42,10 @@ export function SyncPane() {
         sync: { ...sync, enabled: true, serverUrl: serverUrl.trim(), accountId: id, lastError: null },
       });
       setAccountId(id);
-      app.toast("Sync account created. Lock and unlock once to start syncing.", "success");
+      // Hand the just-derived token to the session so the first sync can run immediately,
+      // rather than making the user lock and unlock to get one.
+      app.setAuthToken(token);
+      app.toast("Sync account created.", "success");
     } catch (e) {
       setErr(e instanceof Error ? e.message : String(e));
     } finally {
@@ -71,7 +74,8 @@ export function SyncPane() {
           lastError: null,
         },
       });
-      app.toast("Connected. Lock and unlock once to start syncing.", "success");
+      app.setAuthToken(token);
+      app.toast("Connected to your sync account.", "success");
     } catch (e) {
       setErr(e instanceof Error ? e.message : String(e));
     } finally {

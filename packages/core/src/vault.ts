@@ -43,13 +43,50 @@ export interface VaultFile {
   fileVersion?: 2;
   header: VaultHeader;
   items: { id: string; ct: Ciphertext }[];
-  /** V2 sync: hard deletes leave a tombstone so other devices cannot resurrect the item. */
-  deletions?: Tombstone[];
+  /**
+   * V2 sync: hard deletes leave a tombstone so other devices cannot resurrect the item.
+   *
+   * SEALED — the deletion time and originating device are encrypted under the Vault Key,
+   * with the item id bound in as associated data. Only the id stays in the clear, because
+   * the server needs it to key the row (and already sees it on the item itself).
+   *
+   * This is what stops a malicious server from FORGING deletions: an attacker who cannot
+   * produce a valid AEAD tag cannot fabricate a tombstone, so it cannot make a client
+   * silently destroy a credential. It also keeps deletion history off the server, per
+   * SPEC.md's "the server only stores encrypted data".
+   */
+  deletions?: SealedTombstone[];
   audit: Ciphertext | null;
   settings: Ciphertext | null;
 }
 
 export const VAULT_FILE_VERSION = 2 as const;
+
+/** A tombstone as it is stored and transmitted: id in the clear, the rest authenticated. */
+export interface SealedTombstone {
+  id: string;
+  ct: Ciphertext;
+}
+
+export function sealTombstone(t: Tombstone, vk: Uint8Array): SealedTombstone {
+  return {
+    id: t.id,
+    ct: encryptJson({ deletedAt: t.deletedAt, deviceId: t.deviceId }, vk, adTombstone(t.id)),
+  };
+}
+
+/** Throws if the tombstone was forged, altered, or moved to a different item id. */
+export function openTombstone(sealed: SealedTombstone, vk: Uint8Array): Tombstone {
+  const inner = decryptJson<{ deletedAt: string; deviceId: string }>(
+    sealed.ct,
+    vk,
+    adTombstone(sealed.id),
+  );
+  if (typeof inner.deletedAt !== "string" || Number.isNaN(Date.parse(inner.deletedAt))) {
+    throw new Error("Tombstone has an invalid deletion time.");
+  }
+  return { id: sealed.id, deletedAt: inner.deletedAt, deviceId: inner.deviceId };
+}
 
 export interface VaultStoreOptions {
   /**
@@ -66,6 +103,9 @@ export interface StorageAdapter {
 }
 
 const adItem = (id: string) => `item:${id}`;
+// Binds a sealed tombstone to the item id it deletes, so a server cannot move a legitimate
+// tombstone onto a different item, nor invent one for an id it has merely observed.
+const adTombstone = (id: string) => `tombstone:${id}`;
 const AD_AUDIT = "audit:v1";
 const AD_SETTINGS = "settings:v1";
 
@@ -122,7 +162,7 @@ export class VaultStore {
   ) {
     this.header = header;
     this.keys = keys;
-    this.items = new Map(items.map((i) => [i.id, i]));
+    this.items = new Map(items.map((i) => [i.id, structuredClone(i)]));
     this.audit = audit;
     this.settings = settings;
     this.storage = storage;
@@ -174,7 +214,20 @@ export class VaultStore {
     // v1 → v2 migration is implicit: no tombstones existed, so the list starts empty.
     // Expired tombstones are garbage-collected on open by whichever device notices first.
     const cutoff = new Date(Date.parse(now()) - TOMBSTONE_RETENTION_DAYS * 86_400_000);
-    const deletions = (file.deletions ?? []).filter((d) => new Date(d.deletedAt) >= cutoff);
+    const deletions: Tombstone[] = [];
+    let forgedTombstones = 0;
+    for (const sealed of file.deletions ?? []) {
+      let t: Tombstone;
+      try {
+        t = openTombstone(sealed, keys.vk);
+      } catch {
+        // Failed authentication means forged or corrupted — never act on it, but never
+        // pretend it did not happen either: a forged deletion is an attack signal.
+        forgedTombstones++;
+        continue;
+      }
+      if (new Date(t.deletedAt) >= cutoff) deletions.push(t);
+    }
     // Seed the ciphertext cache from the file: every item is clean at open time, so nothing
     // is re-encrypted until it is actually edited.
     const ctCache = new Map(file.items.map((e) => [e.id, e.ct]));
@@ -189,6 +242,12 @@ export class VaultStore {
       store.integrityWarnings.push(
         "This vault previously had a recovery key configured, but its recovery data is now missing or altered. " +
           "The vault file may have been tampered with. Create a fresh recovery kit now, and treat old kits as invalid.",
+      );
+    }
+    if (forgedTombstones > 0) {
+      store.integrityWarnings.push(
+        `${forgedTombstones} deletion record(s) in this vault failed their integrity check and were ignored. ` +
+          "Someone may have tried to make this device delete entries. Nothing was deleted.",
       );
     }
     if ("recoveryKey" in credential) {
@@ -223,7 +282,7 @@ export class VaultStore {
         id: item.id,
         ct: this.ciphertextFor(item),
       })),
-      deletions: [...this.deletions.values()],
+      deletions: [...this.deletions.values()].map((t) => sealTombstone(t, this.keys.vk)),
       audit: encryptJson(this.audit, this.keys.vk, AD_AUDIT),
       settings: encryptJson(this.settings, this.keys.vk, AD_SETTINGS),
     };
@@ -262,13 +321,19 @@ export class VaultStore {
 
   // ---- items ---------------------------------------------------------------
 
+  // Public accessors hand out DEEP CLONES, never the live objects. A caller that mutated a
+  // returned item (or its nested fields) would bypass markDirty(), so serialize() would emit
+  // the stale cached ciphertext while the UI showed the new value — the edit would be
+  // silently lost on the next persist or sync. Cloning makes that mistake impossible.
   listItems(opts?: { includeArchived?: boolean }): VaultItem[] {
     const all = [...this.items.values()];
-    return opts?.includeArchived ? all : all.filter((i) => !i.archived);
+    const visible = opts?.includeArchived ? all : all.filter((i) => !i.archived);
+    return visible.map((i) => structuredClone(i));
   }
 
   getItem(id: string): VaultItem | undefined {
-    return this.items.get(id);
+    const item = this.items.get(id);
+    return item ? structuredClone(item) : undefined;
   }
 
   async addItem(input: NewItemInput): Promise<VaultItem> {
@@ -281,8 +346,10 @@ export class VaultStore {
       tags: input.tags ?? [],
       favorite: input.favorite ?? false,
       archived: false,
-      fields: input.fields ?? {},
-      customFields: input.customFields ?? [],
+      // Clone caller-supplied nested values: keeping the caller's own objects would let
+      // them mutate vault state from outside without invalidating the ciphertext cache.
+      fields: structuredClone(input.fields ?? {}),
+      customFields: structuredClone(input.customFields ?? []),
       notes: input.notes ?? "",
       reminders: input.reminders ?? [],
       passwordHistory: [],
@@ -296,7 +363,7 @@ export class VaultStore {
     this.markDirty(item.id);
     this.log("item_created", item.title);
     await this.persist();
-    return item;
+    return structuredClone(item);
   }
 
   async updateItem(
@@ -322,11 +389,11 @@ export class VaultStore {
       }
     }
 
-    Object.assign(item, changes, { updatedAt: t });
+    Object.assign(item, structuredClone(changes), { updatedAt: t });
     this.markDirty(id);
     this.log("item_edited", item.title);
     await this.persist();
-    return item;
+    return structuredClone(item);
   }
 
   async deleteItem(id: string): Promise<void> {
@@ -418,6 +485,19 @@ export class VaultStore {
     return [...this.deletions.values()];
   }
 
+  /** Sealed tombstones for upload — the server never sees a deletion time or device. */
+  getSealedDeletions(): SealedTombstone[] {
+    return [...this.deletions.values()].map((t) => sealTombstone(t, this.keys.vk));
+  }
+
+  /**
+   * Authenticate a tombstone pulled from the server. Throws if it was forged or altered,
+   * which is the whole defence against a malicious server deleting credentials remotely.
+   */
+  openSealedTombstone(sealed: SealedTombstone): Tombstone {
+    return openTombstone(sealed, this.keys.vk);
+  }
+
   /** Per-item ciphertext for upload. Uses the cache, so clean items keep a stable ct. */
   getItemCiphertexts(): { id: string; ct: Ciphertext }[] {
     return [...this.items.values()].map((item) => ({ id: item.id, ct: this.ciphertextFor(item) }));
@@ -440,7 +520,7 @@ export class VaultStore {
     changedIds: Iterable<string>,
   ): Promise<void> {
     for (const id of changedIds) this.markDirty(id);
-    this.items = new Map(items.map((i) => [i.id, i]));
+    this.items = new Map(items.map((i) => [i.id, structuredClone(i)]));
     this.deletions = new Map(deletions.map((d) => [d.id, d]));
     // Drop cache entries for items that no longer exist.
     for (const id of [...this.ctCache.keys()]) if (!this.items.has(id)) this.ctCache.delete(id);
@@ -453,7 +533,7 @@ export class VaultStore {
   }
 
   getSettings(): VaultSettings {
-    return this.settings;
+    return structuredClone(this.settings);
   }
 
   // ---- keys / recovery -----------------------------------------------------

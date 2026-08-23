@@ -18,6 +18,7 @@ import { VaultStore, restoreBackup, estimateStrength } from "@pw/core";
 import { fileStorage } from "../storage";
 import { useVault } from "./VaultContext";
 import { clearStoredMasterPassword } from "../security/biometric";
+import { loadSyncConfig } from "../sync/config";
 import { Button, Chip, Field, StrengthBar, WarningBanner } from "../components/ui";
 import { RecoveryKeyCard } from "../components/RecoveryKeyCard";
 import { colors, spacing } from "../theme";
@@ -64,7 +65,9 @@ export function RestoreVaultView({ onDone, onCancel }: { onDone: () => void; onC
         credKind === "password" ? { password: credential } : { recoveryKey: credential };
       const { vaultSerialized } = restoreBackup(backupText, cred);
       await fileStorage.save(vaultSerialized);
-      const store = await VaultStore.open(vaultSerialized, cred, fileStorage);
+      const store = await VaultStore.open(vaultSerialized, cred, fileStorage, {
+        deviceId: loadSyncConfig().deviceId,
+      });
       await store.logAndPersist("restore_completed", fileName);
       // Any biometric-cached master password may not match the restored vault.
       await clearStoredMasterPassword();

@@ -98,6 +98,7 @@ export default function App() {
       <AppProvider
         store={store}
         authTokenB64={authToken}
+        onAuthToken={setAuthToken}
         onLock={handleLock}
         onReplaceStore={handleReplaceStore}
       >

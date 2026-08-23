@@ -1,0 +1,22 @@
+{
+  // Emit build for deployment: plain node runs dist/, no TypeScript loader on the VM.
+  //
+  // Resolution stays "bundler" (not NodeNext) because @pw/core and @pw/sync are source-only
+  // workspace packages whose internal imports are extensionless, which NodeNext rejects.
+  // That is fine here: every cross-package import in src/ is `import type`, so it is erased
+  // at emit and dist/ has no runtime dependency on them — only fastify, pg, @node-rs/argon2.
+  // Relative imports in src/ already carry .js specifiers, so the emitted ESM runs as-is.
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "skipLibCheck": true,
+    "types": ["node"],
+    "outDir": "dist",
+    "rootDir": "src",
+    "sourceMap": true
+  },
+  "include": ["src"]
+}

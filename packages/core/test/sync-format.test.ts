@@ -111,21 +111,43 @@ describe("deletion tombstones", () => {
   });
 
   it("garbage-collects tombstones older than the retention window on open", async () => {
-    const { storage, store, a } = await vaultWithTwoItems();
-    await store.deleteItem(a.id);
+    // Delete with a clock set well before the retention window, then reopen with the real
+    // clock. Sealing means the tombstone cannot be hand-written into the file any more.
+    const storage = memStorage();
+    const ancient = () =>
+      new Date(Date.now() - (TOMBSTONE_RETENTION_DAYS + 5) * 86_400_000).toISOString();
+    const old = await VaultStore.create(PW, storage, { now: ancient, deviceId: "device-A" });
+    const item = await old.addItem({ type: "login", title: "Gone", fields: {} });
+    await old.deleteItem(item.id);
+    expect(old.getDeletions()).toHaveLength(1);
 
-    // Rewrite the persisted tombstone as ancient, then reopen.
-    const file = parseVaultFile(storage.data!);
-    file.deletions = [
-      { id: a.id, deletedAt: new Date(Date.now() - (TOMBSTONE_RETENTION_DAYS + 5) * 86_400_000).toISOString(), deviceId: "device-A" },
-    ];
-    const reopened = await VaultStore.open(
-      JSON.stringify(file),
-      { password: PW },
-      storage,
-      { now: () => new Date().toISOString(), deviceId: "device-A" },
-    );
+    const reopened = await VaultStore.open(storage.data!, { password: PW }, storage, {
+      now: () => new Date().toISOString(),
+      deviceId: "device-A",
+    });
     expect(reopened.getDeletions()).toHaveLength(0);
+  });
+
+  it("ignores a forged tombstone and warns instead of deleting anything", async () => {
+    // A malicious server's core capability: inventing a deletion for an item it can see.
+    const { storage, store, a } = await vaultWithTwoItems();
+    const file = parseVaultFile(storage.data!);
+    file.deletions = [{ id: a.id, ct: { nonceB64: "AAAA", ctB64: "BBBB" } }];
+
+    const reopened = await VaultStore.open(JSON.stringify(file), { password: PW }, storage, {
+      now,
+      deviceId: "device-A",
+    });
+    expect(reopened.getDeletions()).toHaveLength(0);
+    expect(reopened.getItem(a.id)).toBeDefined(); // the credential survives
+    expect(reopened.getIntegrityWarnings().join(" ")).toMatch(/failed their integrity check/i);
+  });
+
+  it("rejects a valid tombstone transplanted onto a different item id", async () => {
+    const { store, a, b } = await vaultWithTwoItems();
+    await store.deleteItem(a.id);
+    const sealed = store.getSealedDeletions()[0]!;
+    expect(() => store.openSealedTombstone({ id: b.id, ct: sealed.ct })).toThrow();
   });
 });
 
@@ -150,5 +172,38 @@ describe("v1 → v2 migration", () => {
     const storage = memStorage();
     const store = await VaultStore.create(PW, storage, now);
     expect(store.getDeviceId()).toBe("local");
+  });
+});
+
+describe("accessors cannot corrupt the ciphertext cache", () => {
+  // Regression for the independent review's "stale ciphertext" finding: a caller that
+  // mutates a returned item must not be able to make serialize() emit stale ciphertext
+  // while the in-memory value looks updated.
+  it("mutating an item returned by getItem does not change vault state", async () => {
+    const { storage, store, a } = await vaultWithTwoItems();
+    const before = ctOf(storage.data!, a.id);
+
+    const item = store.getItem(a.id)!;
+    item.fields.password = "tampered";
+    item.title = "tampered";
+
+    expect(store.getItem(a.id)!.fields.password).toBe("aaa");
+    await store.updateSettings({ autoLockMinutes: 4 }); // force a persist
+    expect(ctOf(storage.data!, a.id)).toBe(before);
+  });
+
+  it("mutating an item returned by listItems does not change vault state", async () => {
+    const { store, a } = await vaultWithTwoItems();
+    const listed = store.listItems().find((i) => i.id === a.id)!;
+    listed.fields.password = "tampered";
+    expect(store.getItem(a.id)!.fields.password).toBe("aaa");
+  });
+
+  it("mutating the input passed to addItem does not change vault state", async () => {
+    const { store } = await vaultWithTwoItems();
+    const fields = { password: "original" };
+    const created = await store.addItem({ type: "login", title: "Gamma", fields });
+    fields.password = "tampered";
+    expect(store.getItem(created.id)!.fields.password).toBe("original");
   });
 });

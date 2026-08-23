@@ -70,6 +70,10 @@ input[type="text"], input[type="password"], input[type="number"], input[type="se
 
 .section-title { font-weight: 700; font-size: 13px; margin: 6px 0; display: flex; justify-content: space-between; align-items: center; }
 
+.kv { font-size: 12px; margin: 6px 0; }
+.kv dt { color: var(--muted); margin-top: 4px; }
+.kv dd { margin: 0 0 2px; }
+
 .modal-backdrop { position: fixed; inset: 0; background: rgba(0,0,0,0.35); display: flex; align-items: center; justify-content: center; z-index: 10; }
 .modal { background: #fff; border-radius: 10px; padding: 14px; width: 320px; max-height: 90%; overflow-y: auto; }
 

@@ -76,7 +76,7 @@ function guessDeviceLabel(): string {
 export function loadConfig(): AppConfig {
   try {
     const raw = localStorage.getItem(KEY);
-    if (!raw) return structuredClone(DEFAULTS);
+    if (!raw) return ensureDeviceIdentity(structuredClone(DEFAULTS));
     const parsed = JSON.parse(raw) as Partial<AppConfig>;
     const cfg: AppConfig = {
       ...structuredClone(DEFAULTS),

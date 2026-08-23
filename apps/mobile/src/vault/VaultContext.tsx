@@ -17,6 +17,7 @@ import {
   WrongCredentialError,
   verifyMasterPassword,
 } from "@pw/core";
+import { deriveAuthToken } from "@pw/sync";
 import { initSodium } from "../sodiumProvider";
 import {
   DevicePrefs,
@@ -36,8 +37,25 @@ import {
   storeSharedVaultKey,
 } from "../security/biometric";
 import { syncCredentialIdentities, clearCredentialIdentities } from "../security/identitySync";
+import { loadSyncConfig, saveSyncConfig, type SyncIdentity } from "../sync/config";
+import { useSync, type SyncStatus } from "../sync/useSync";
 import { Button, Field } from "../components/ui";
 import { colors, spacing } from "../theme";
+
+/** Placeholder identity used only until initSodium() has run — randomId() needs sodium. */
+const PLACEHOLDER_IDENTITY: SyncIdentity = {
+  deviceId: "",
+  deviceLabel: "",
+  sync: {
+    enabled: false,
+    serverUrl: "",
+    accountId: "",
+    lastSyncRev: 0,
+    highestSeenRev: 0,
+    lastSyncAt: null,
+    lastError: null,
+  },
+};
 
 export type VaultStatus = "loading" | "none" | "locked" | "unlocked" | "error";
 
@@ -63,6 +81,17 @@ interface VaultContextValue {
   /** Reauth gate for reveal/copy/recovery changes: biometric, else master password. */
   reauth: (reason: string) => Promise<boolean>;
   reauthPassword: (reason: string) => Promise<string | null>;
+
+  // ---- multi-device sync (SYNC-DESIGN.md) ----
+  syncIdentity: SyncIdentity;
+  updateSyncConfig: (patch: Partial<SyncIdentity["sync"]>) => void;
+  /**
+   * Derived at unlock — the one moment the master password is legitimately in hand — and
+   * held in memory only. Never persisted. Cleared on lock.
+   */
+  authTokenB64: string | null;
+  syncStatus: SyncStatus;
+  syncNow: (opts?: { silent?: boolean }) => Promise<void>;
 }
 
 const Ctx = createContext<VaultContextValue | null>(null);
@@ -88,6 +117,18 @@ export function VaultProvider({ children }: { children: React.ReactNode }) {
   const [prefs, setPrefsState] = useState<DevicePrefs>(readPrefs);
   const refresh = useCallback(() => setTick((t) => t + 1), []);
 
+  // ---- multi-device sync state ----
+  const [syncIdentity, setSyncIdentity] = useState<SyncIdentity>(PLACEHOLDER_IDENTITY);
+  const [authTokenB64, setAuthTokenB64] = useState<string | null>(null);
+
+  const updateSyncConfig = useCallback((patch: Partial<SyncIdentity["sync"]>) => {
+    setSyncIdentity((prev) => {
+      const next = { ...prev, sync: { ...prev.sync, ...patch } };
+      saveSyncConfig(next);
+      return next;
+    });
+  }, []);
+
   // Master-password fallback prompt (used by reauth when biometrics are unavailable).
   const [pwPrompt, setPwPrompt] = useState<{ reason: string; resolve: (password: string | null) => void } | null>(null);
   const [pwInput, setPwInput] = useState("");
@@ -96,6 +137,9 @@ export function VaultProvider({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     void (async () => {
       await initSodium();
+      // randomId() (used to mint a device id on first run) needs sodium initialized, so the
+      // sync identity can only be loaded after this point.
+      setSyncIdentity(loadSyncConfig());
       try {
         setStatus(vaultExists() ? "locked" : "none");
       } catch (e) {
@@ -123,6 +167,7 @@ export function VaultProvider({ children }: { children: React.ReactNode }) {
       s?.lock(); // wipes VK/BK
       return null;
     });
+    setAuthTokenB64(null); // never held past the unlocked session
     setStatus((st) => (st === "unlocked" ? "locked" : st));
   }, []);
 
@@ -160,25 +205,49 @@ export function VaultProvider({ children }: { children: React.ReactNode }) {
     });
   }, []);
 
-  const createVault = useCallback(async (masterPassword: string) => {
-    const s = await VaultStore.create(masterPassword, fileStorage);
-    setStore(s);
-    setStatus("unlocked");
-    return s;
-  }, []);
+  const createVault = useCallback(
+    async (masterPassword: string) => {
+      const s = await VaultStore.create(masterPassword, fileStorage, { deviceId: syncIdentity.deviceId });
+      setStore(s);
+      setStatus("unlocked");
+      return s;
+    },
+    [syncIdentity.deviceId],
+  );
 
-  const unlockWithPassword = useCallback(async (password: string) => {
-    const s = await VaultStore.open(readVault(), { password }, fileStorage);
-    setStore(s);
-    setStatus("unlocked");
-  }, []);
+  const unlockWithPassword = useCallback(
+    async (password: string) => {
+      const s = await VaultStore.open(readVault(), { password }, fileStorage, {
+        deviceId: syncIdentity.deviceId,
+      });
+      // Derive the sync auth token here — the one moment the master password is legitimately
+      // in hand. Held in memory only (this context's state); never persisted. See
+      // packages/sync/src/auth.ts and SYNC-DESIGN.md §4.
+      setAuthTokenB64(
+        syncIdentity.sync.enabled && syncIdentity.sync.accountId
+          ? deriveAuthToken(password, s.getHeader().kdf)
+          : null,
+      );
+      setStore(s);
+      setStatus("unlocked");
+    },
+    [syncIdentity.deviceId, syncIdentity.sync.enabled, syncIdentity.sync.accountId],
+  );
 
-  const unlockWithRecoveryKey = useCallback(async (recoveryKey: string) => {
-    const s = await VaultStore.open(readVault(), { recoveryKey }, fileStorage);
-    setStore(s);
-    setStatus("unlocked");
-    return s;
-  }, []);
+  const unlockWithRecoveryKey = useCallback(
+    async (recoveryKey: string) => {
+      // Recovery-key unlock does not yield a KEK, so it cannot produce an auth token
+      // (SYNC-DESIGN.md §4). A device recovering this way must set a new master password
+      // before it can sync — the existing forced post-recovery flow already requires that.
+      const s = await VaultStore.open(readVault(), { recoveryKey }, fileStorage, {
+        deviceId: syncIdentity.deviceId,
+      });
+      setStore(s);
+      setStatus("unlocked");
+      return s;
+    },
+    [syncIdentity.deviceId],
+  );
 
   const unlockWithBiometrics = useCallback(async (): Promise<boolean> => {
     // The SecureStore read triggers the OS biometric prompt itself.
@@ -290,6 +359,35 @@ export function VaultProvider({ children }: { children: React.ReactNode }) {
     setPwInput("");
   }, [pwPrompt]);
 
+  const { status: syncStatus, syncNow } = useSync(store, syncIdentity, updateSyncConfig, authTokenB64);
+
+  // Trigger a sync on unlock (once authTokenB64 is available), silently — failures surface
+  // via syncStatus.lastError in the Sync settings screen, not a popup on every launch.
+  useEffect(() => {
+    if (status === "unlocked" && syncIdentity.sync.enabled && authTokenB64) {
+      void syncNow({ silent: true });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [status, authTokenB64, syncIdentity.sync.enabled]);
+
+  // Slow background timer while unlocked (SYNC-DESIGN.md is offline-first; this just keeps
+  // devices from drifting too far apart between explicit "Sync now" taps).
+  useEffect(() => {
+    if (status !== "unlocked" || !syncIdentity.sync.enabled) return;
+    const SYNC_INTERVAL_MS = 5 * 60 * 1000;
+    const timer = setInterval(() => void syncNow({ silent: true }), SYNC_INTERVAL_MS);
+    return () => clearInterval(timer);
+  }, [status, syncIdentity.sync.enabled, syncNow]);
+
+  // Sync on app foreground (in addition to the existing lock-on-background listener above).
+  useEffect(() => {
+    if (status !== "unlocked" || !syncIdentity.sync.enabled) return;
+    const sub = AppState.addEventListener("change", (next) => {
+      if (next === "active") void syncNow({ silent: true });
+    });
+    return () => sub.remove();
+  }, [status, syncIdentity.sync.enabled, syncNow]);
+
   const value = useMemo<VaultContextValue>(
     () => ({
       status,
@@ -309,10 +407,16 @@ export function VaultProvider({ children }: { children: React.ReactNode }) {
       disableBiometrics,
       reauth,
       reauthPassword,
+      syncIdentity,
+      updateSyncConfig,
+      authTokenB64,
+      syncStatus,
+      syncNow,
     }),
     [status, errorMessage, store, tick, refresh, prefs, setPrefs, createVault, unlockWithPassword,
      unlockWithRecoveryKey, unlockWithBiometrics, lock, adoptStore, enableBiometrics,
-     disableBiometrics, reauth, reauthPassword],
+     disableBiometrics, reauth, reauthPassword, syncIdentity, updateSyncConfig, authTokenB64,
+     syncStatus, syncNow],
   );
 
   return (

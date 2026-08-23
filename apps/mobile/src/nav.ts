@@ -12,6 +12,7 @@ export type RootStackParamList = {
   Backup: undefined;
   Settings: undefined;
   Activity: undefined;
+  Sync: undefined;
 };
 
 export type ScreenProps<T extends keyof RootStackParamList> = NativeStackScreenProps<

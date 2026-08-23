@@ -15,6 +15,12 @@ import {
   type ItemType,
   type VaultItem,
 } from "@pw/core";
+import {
+  deriveAuthToken,
+  RollbackDetectedError,
+  SyncAuthError,
+  SyncClient,
+} from "@pw/sync";
 import { blockedForMs, nextBackoffState, resetBackoff } from "../lib/backoff";
 import {
   extStorageAdapter,
@@ -32,14 +38,38 @@ import {
   isValidClipboardClearSeconds,
 } from "../lib/bounds";
 import { isFillRefusedField, requiresPerFillConfirmation } from "../lib/sensitiveFields";
-import type { ItemSummary, Req, Res, VaultStatus } from "../lib/messages";
+import { DEFAULT_SYNC_CONFIG, ensureDeviceIdentity, loadSyncConfig, saveSyncConfig } from "../lib/syncConfig";
+import { loadSyncBase, saveSyncBase } from "../lib/syncBase";
+import type { ItemSummary, Req, Res, SyncStatusView, VaultStatus } from "../lib/messages";
 import { TEMPLATES } from "@pw/core";
 
 const ALARM_AUTO_LOCK = "pwmext-auto-lock";
 const ALARM_CLIPBOARD_CLEAR = "pwmext-clipboard-clear";
+// Slow periodic sync, on top of the popup-open and post-save triggers below (SYNC-DESIGN.md
+// §5 pull-merge-push is cheap and idempotent, so a coarse timer is enough).
+const ALARM_SYNC = "pwmext-sync-timer";
+const SYNC_INTERVAL_MINUTES = 20;
 
 let store: VaultStore | null = null;
 let cryptoReady: Promise<void> | null = null;
+
+// ---- sync session state — MEMORY ONLY, same lifetime as `store` -------------------------
+//
+// The auth token is derived from the master password at unlock (the one moment it is
+// legitimately in hand) and held here, in the background worker's memory, exactly like the
+// unlocked VaultStore itself. It is NEVER written to chrome.storage, NEVER included in a
+// runtime message to the popup, and is wiped by lock() — so an MV3 service-worker kill (which
+// already wipes `store`, forcing re-unlock) equally wipes this. There is nothing to recover:
+// the next unlock re-derives it from the password, same as today's unlock re-opens the vault.
+let authTokenB64: string | null = null;
+let syncClient: SyncClient | null = null;
+let syncBusy = false;
+let lastConflictCount = 0;
+
+function resetSyncSession(): void {
+  authTokenB64 = null;
+  syncClient = null;
+}
 
 async function ensureCrypto(): Promise<void> {
   if (!cryptoReady) cryptoReady = initCrypto();
@@ -66,12 +96,15 @@ function lock(): void {
     store = null;
     broadcast("LOCKED");
   }
+  resetSyncSession();
   chrome.alarms.clear(ALARM_AUTO_LOCK);
+  chrome.alarms.clear(ALARM_SYNC);
 }
 
 chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name === ALARM_AUTO_LOCK) lock();
   if (alarm.name === ALARM_CLIPBOARD_CLEAR) void clearClipboardViaOffscreen();
+  if (alarm.name === ALARM_SYNC) void runSync({ silent: true });
 });
 
 // Locking on browser/profile close: chrome.storage.local persists across restarts by design
@@ -80,8 +113,101 @@ chrome.alarms.onAlarm.addListener((alarm) => {
 // here; this listener just makes the "why" explicit and clears any stray alarm.
 chrome.runtime.onStartup.addListener(() => {
   store = null;
+  resetSyncSession();
   chrome.alarms.clear(ALARM_AUTO_LOCK);
+  chrome.alarms.clear(ALARM_SYNC);
 });
+
+// ---- sync ---------------------------------------------------------------------------------
+
+async function scheduleSyncAlarm(): Promise<void> {
+  chrome.alarms.clear(ALARM_SYNC);
+  const cfg = await loadSyncConfig();
+  if (cfg.enabled) chrome.alarms.create(ALARM_SYNC, { periodInMinutes: SYNC_INTERVAL_MINUTES });
+}
+
+function getSyncClient(cfg: { serverUrl: string }, deviceId: string, deviceLabel: string): SyncClient {
+  if (!syncClient) {
+    syncClient = new SyncClient({
+      fetch: (...args: Parameters<typeof fetch>) => fetch(...args),
+      serverUrl: cfg.serverUrl,
+      deviceId,
+      deviceLabel,
+    });
+  }
+  return syncClient;
+}
+
+/**
+ * One sync cycle: pull, merge, push. Offline-first — any failure here leaves the local vault
+ * fully usable and is recorded in the sync config's lastError for the popup to surface, never thrown up to
+ * whatever triggered it (a save, the timer, or popup open must never crash on a bad network).
+ */
+async function runSync(opts: { silent: boolean }): Promise<void> {
+  if (!store) return;
+  const cfg = await loadSyncConfig();
+  if (!cfg.enabled || !cfg.serverUrl || !cfg.accountId) return;
+  if (!authTokenB64) return; // not derivable until the next unlock — same rule as the web app
+  if (syncBusy) return;
+  syncBusy = true;
+  try {
+    const { deviceId, deviceLabel } = await ensureDeviceIdentity();
+    const client = getSyncClient(cfg, deviceId, deviceLabel);
+    if (!client.isSignedIn()) await client.login(cfg.accountId, authTokenB64);
+
+    const base = await loadSyncBase();
+    const res = await client.sync(
+      store,
+      { lastSyncRev: cfg.lastSyncRev, highestSeenRev: cfg.highestSeenRev },
+      base,
+    );
+
+    await saveSyncBase(res.base);
+    await saveSyncConfig({
+      ...cfg,
+      lastSyncRev: res.state.lastSyncRev,
+      highestSeenRev: res.state.highestSeenRev,
+      lastSyncAt: new Date().toISOString(),
+      lastError: null,
+    });
+
+    // Conflicts are never silent: the losing edit was preserved as a separate item and the
+    // audit log + popup banner both have to say so, or the duplicate goes unnoticed.
+    for (const conflict of res.outcome.conflicts) {
+      store.log("item_conflicted", conflict.title);
+    }
+    lastConflictCount = res.outcome.conflicts.length;
+    for (const w of res.outcome.warnings) await saveSyncConfig({ ...(await loadSyncConfig()), lastError: w });
+    store.log("sync_completed");
+    await store.persist();
+  } catch (e) {
+    const msg =
+      e instanceof RollbackDetectedError
+        ? e.message
+        : e instanceof SyncAuthError
+          ? "Sync sign-in failed. If the master password changed on another device, unlock with the new one."
+          : e instanceof Error
+            ? e.message
+            : String(e);
+    store.log("sync_failed");
+    await store.persist().catch(() => {});
+    await saveSyncConfig({ ...(await loadSyncConfig()), lastError: msg });
+  } finally {
+    syncBusy = false;
+  }
+  void opts; // silent vs. non-silent only matters to the popup's toast, not this cycle
+}
+
+async function syncStatusView(): Promise<SyncStatusView> {
+  const [cfg, { deviceLabel }] = await Promise.all([loadSyncConfig(), ensureDeviceIdentity()]);
+  return {
+    config: cfg,
+    deviceLabel,
+    canSync: authTokenB64 !== null,
+    busy: syncBusy,
+    lastConflictCount,
+  };
+}
 
 // ---- offscreen document for clipboard-clear-after-popup-close (Chrome/Edge only) ----------
 
@@ -181,8 +307,9 @@ async function handle(req: Req): Promise<Res> {
         return { ok: false, error: "Too many failed attempts. Please wait before trying again." };
       }
       try {
+        const { deviceId } = await ensureDeviceIdentity();
         const { vaultSerialized } = restoreBackup(req.backupText, req.credential);
-        const opened = await VaultStore.open(vaultSerialized, req.credential, extStorageAdapter);
+        const opened = await VaultStore.open(vaultSerialized, req.credential, extStorageAdapter, { deviceId });
         await opened.logAndPersist("restore_completed");
         store = opened;
         await saveBackoff(resetBackoff());
@@ -190,7 +317,15 @@ async function handle(req: Req): Promise<Res> {
           autoLockMinutes: store.settings.autoLockMinutes,
           clipboardClearSeconds: store.settings.clipboardClearSeconds,
         });
+        // Derive the sync auth token here too — restoring a backup with the master password
+        // is just as legitimate a "password in hand" moment as UNLOCK below.
+        const cfg = await loadSyncConfig();
+        authTokenB64 =
+          cfg.enabled && cfg.accountId && "password" in req.credential
+            ? deriveAuthToken(req.credential.password, store.getHeader().kdf)
+            : null;
         await scheduleAutoLock();
+        await scheduleSyncAlarm();
         broadcast("UNLOCKED");
         return { ok: true, status: await status() };
       } catch (e) {
@@ -207,14 +342,21 @@ async function handle(req: Req): Promise<Res> {
       const blob = await loadVaultBlob();
       if (!blob) return { ok: false, error: "No vault has been imported yet." };
       try {
-        const opened = await VaultStore.open(blob, { password: req.password }, extStorageAdapter);
+        const { deviceId } = await ensureDeviceIdentity();
+        const opened = await VaultStore.open(blob, { password: req.password }, extStorageAdapter, { deviceId });
         store = opened;
         await saveBackoff(resetBackoff());
         await savePrefs({
           autoLockMinutes: store.settings.autoLockMinutes,
           clipboardClearSeconds: store.settings.clipboardClearSeconds,
         });
+        // Derive the sync auth token here, the one moment we legitimately hold the master
+        // password (SYNC-DESIGN.md §4). The password itself is discarded when this handler
+        // returns; only this one-way, in-memory token survives, and only until lock().
+        const cfg = await loadSyncConfig();
+        authTokenB64 = cfg.enabled && cfg.accountId ? deriveAuthToken(req.password, store.getHeader().kdf) : null;
         await scheduleAutoLock();
+        await scheduleSyncAlarm();
         broadcast("UNLOCKED");
         return { ok: true, status: await status() };
       } catch (e) {
@@ -269,6 +411,9 @@ async function handle(req: Req): Promise<Res> {
         fields: { username: req.username, password: req.password, url: req.url },
       });
       await scheduleAutoLock();
+      // Fire-and-forget: a save should not make the popup wait on a network round trip, and
+      // the vault is already fully usable and persisted locally either way.
+      void runSync({ silent: true });
       return { ok: true };
     }
 
@@ -370,6 +515,64 @@ async function handle(req: Req): Promise<Res> {
       return { ok: true };
     }
 
+    case "SYNC_STATUS":
+      return { ok: true, sync: await syncStatusView() };
+
+    case "SYNC_CONNECT": {
+      if (!store) return { ok: false, error: "Vault is locked." };
+      if (!verifyMasterPassword(store.getHeader(), req.masterPassword)) {
+        return { ok: false, error: "Incorrect master password.", requiresReauth: true };
+      }
+      const serverUrl = req.serverUrl.trim();
+      const accountId = req.accountId.trim();
+      try {
+        const { deviceId, deviceLabel } = await ensureDeviceIdentity();
+        const token = deriveAuthToken(req.masterPassword, store.getHeader().kdf);
+        const client = new SyncClient({
+          fetch: (...args: Parameters<typeof fetch>) => fetch(...args),
+          serverUrl,
+          deviceId,
+          deviceLabel,
+        });
+        let resolvedAccountId: string;
+        if (accountId) {
+          await client.login(accountId, token);
+          resolvedAccountId = accountId;
+        } else {
+          resolvedAccountId = await client.register(deviceLabel, token, store);
+        }
+        syncClient = client;
+        authTokenB64 = token;
+        await saveSyncConfig({
+          ...DEFAULT_SYNC_CONFIG,
+          ...(await loadSyncConfig()),
+          enabled: true,
+          serverUrl,
+          accountId: resolvedAccountId,
+          lastError: null,
+        });
+        await scheduleSyncAlarm();
+        void runSync({ silent: true });
+        return { ok: true, sync: await syncStatusView() };
+      } catch (e) {
+        return { ok: false, error: e instanceof Error ? e.message : String(e) };
+      }
+    }
+
+    case "SYNC_DISABLE": {
+      const cfg = await loadSyncConfig();
+      await saveSyncConfig({ ...cfg, enabled: false });
+      chrome.alarms.clear(ALARM_SYNC);
+      syncClient = null;
+      return { ok: true, sync: await syncStatusView() };
+    }
+
+    case "SYNC_NOW": {
+      if (!store) return { ok: false, error: "Vault is locked." };
+      await runSync({ silent: false });
+      return { ok: true, sync: await syncStatusView() };
+    }
+
     default:
       return { ok: false, error: "Unknown request." };
   }
@@ -388,6 +591,10 @@ const POPUP_ONLY_KINDS: ReadonlySet<Req["kind"]> = new Set([
   "SAVE_LOGIN",
   "UPDATE_SETTINGS",
   "FILL_ACTIVE_TAB",
+  "SYNC_STATUS",
+  "SYNC_CONNECT",
+  "SYNC_DISABLE",
+  "SYNC_NOW",
 ]);
 
 /**

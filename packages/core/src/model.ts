@@ -134,9 +134,12 @@ export const MAX_PASSWORD_HISTORY = 20;
 export const MAX_AUDIT_EVENTS = 1000;
 
 /**
- * Deletion tombstone (V2 sync). A hard delete cannot simply drop the item: another device
- * that still holds it would push it back and resurrect a credential the user deliberately
- * destroyed. Tombstones are retained TOMBSTONE_RETENTION_DAYS, then garbage-collected.
+ * Deletion tombstone (V2 sync), in plaintext and in memory only. A hard delete cannot
+ * simply drop the item: another device that still holds it would push it back and
+ * resurrect a credential the user deliberately destroyed. Tombstones are retained
+ * TOMBSTONE_RETENTION_DAYS, then garbage-collected.
+ *
+ * These NEVER cross the wire or reach disk in this form — see SealedTombstone.
  */
 export interface Tombstone {
   id: string;

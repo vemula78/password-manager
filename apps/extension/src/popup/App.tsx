@@ -23,6 +23,10 @@ export function App() {
     void refresh();
     void getActiveTab().then(setActiveTab);
     void call({ kind: "NOTE_ACTIVITY" });
+    // Best-effort: sync whenever the popup opens on an unlocked vault. Silent by design —
+    // SYNC_NOW itself decides whether sync is even configured, and any failure just leaves
+    // config.lastError set for the Sync panel to show, never a popup-blocking error here.
+    void call({ kind: "SYNC_NOW" }).catch(() => {});
 
     const onMsg = (msg: { kind?: string }) => {
       if (msg?.kind === "LOCKED" || msg?.kind === "UNLOCKED") void refresh();

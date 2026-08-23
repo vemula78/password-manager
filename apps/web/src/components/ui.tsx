@@ -1,5 +1,5 @@
 import { estimateStrength, type Strength } from "@pw/core";
-import { type ReactNode, useEffect, useRef } from "react";
+import { type ReactNode, useEffect, useRef, useState } from "react";
 
 /* ---------- Modal ---------- */
 
@@ -81,4 +81,23 @@ export function formatDateTime(iso: string | null | undefined): string {
   if (isNaN(d.getTime())) return iso;
   const p = (n: number) => String(n).padStart(2, "0");
   return `${formatDate(iso)} ${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+
+/**
+ * Track a CSS media query from React. Used to place the item detail inline on narrow
+ * screens instead of after the whole list — a CSS-only version is not possible because the
+ * detail has to move to a different position in the DOM, not just restyle.
+ */
+export function useMediaQuery(query: string): boolean {
+  const [matches, setMatches] = useState(() =>
+    typeof window !== "undefined" ? window.matchMedia(query).matches : false,
+  );
+  useEffect(() => {
+    const mql = window.matchMedia(query);
+    const onChange = () => setMatches(mql.matches);
+    onChange();
+    mql.addEventListener("change", onChange);
+    return () => mql.removeEventListener("change", onChange);
+  }, [query]);
+  return matches;
 }

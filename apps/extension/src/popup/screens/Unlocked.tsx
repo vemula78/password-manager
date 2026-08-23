@@ -6,6 +6,7 @@ import { GeneratorPanel } from "../components/GeneratorPanel";
 import { ItemRow } from "../components/ItemRow";
 import { SaveLoginPanel } from "../components/SaveLoginPanel";
 import { SettingsPanel } from "../components/SettingsPanel";
+import { SyncPanel } from "../components/SyncPanel";
 
 type Tab = "items" | "save" | "generator" | "settings";
 
@@ -101,7 +102,12 @@ export function Unlocked(props: {
 
         {tab === "save" && <SaveLoginPanel activeTab={props.activeTab} onSaved={() => { void load(query); setTab("items"); }} />}
         {tab === "generator" && <GeneratorPanel clipboardClearSeconds={props.status.clipboardClearSeconds} />}
-        {tab === "settings" && <SettingsPanel status={props.status} onChanged={props.onStatusChanged} />}
+        {tab === "settings" && (
+          <>
+            <SettingsPanel status={props.status} onChanged={props.onStatusChanged} />
+            <SyncPanel />
+          </>
+        )}
       </div>
     </div>
   );

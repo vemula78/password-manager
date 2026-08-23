@@ -27,6 +27,9 @@ const LABELS: Record<string, string> = {
   failed_unlock: "Failed unlock attempt",
   emergency_kit_exported: "Emergency kit exported",
   history_cleared: "History cleared",
+  item_conflicted: "Item edited on two devices",
+  sync_completed: "Synced with server",
+  sync_failed: "Sync failed",
 };
 
 export function ActivityScreen() {

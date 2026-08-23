@@ -10,9 +10,9 @@ import {
   type Reminder,
   type VaultItem,
 } from "@pw/core";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { GeneratorPanel } from "../components/GeneratorPanel";
-import { formatDate, formatDateTime, Modal, Warning } from "../components/ui";
+import { formatDate, formatDateTime, Modal, useMediaQuery, Warning } from "../components/ui";
 import { CATEGORIES, useApp } from "../ctx";
 
 export function Items() {
@@ -35,12 +35,19 @@ export function Items() {
     if (route.addType) setAddType(route.addType);
   }, [route.itemId, route.addType]);
 
-  // Below ~860px the list and detail panes stack vertically (see styles.css), so opening
-  // an item renders its detail below the whole list — scroll it into view or it looks like
-  // nothing happened until the user scrolls all the way down past the list.
+  // Below ~860px there is no room for a side-by-side detail pane, so the detail is rendered
+  // INLINE directly beneath the row that was tapped. Previously it went after the whole list
+  // and had to be scrolled to, which made a tap look like it had done nothing.
+  const narrow = useMediaQuery("(max-width: 860px)");
+
+  // Wide layout only: the detail pane is off to the side and always visible, so nothing to
+  // scroll. Narrow layout places the detail at the tap point, so nothing to scroll there
+  // either — but nudge it into view when the row sits near the bottom of the viewport.
   useEffect(() => {
-    if (selId) detailRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
-  }, [selId]);
+    if (selId && narrow) {
+      detailRef.current?.scrollIntoView({ behavior: "smooth", block: "nearest" });
+    }
+  }, [selId, narrow]);
 
   const items = useMemo(() => {
     let list = query.trim()
@@ -88,8 +95,8 @@ export function Items() {
         <div className="items-list">
           {items.length === 0 && <p className="muted pad">No items yet. Use “+ Add”.</p>}
           {items.map((i) => (
+            <Fragment key={i.id}>
             <div
-              key={i.id}
               role="button"
               tabIndex={0}
               className={`list-row item-row ${selId === i.id ? "active" : ""} ${i.archived ? "archived" : ""}`}
@@ -129,21 +136,33 @@ export function Items() {
                 {i.favorite ? "★" : "☆"}
               </span>
             </div>
+            {narrow && selected && selId === i.id && (
+              <div className="items-detail-inline" ref={detailRef}>
+                <ItemDetail
+                  item={selected}
+                  onEdit={() => setEditItem(selected)}
+                  onClosed={() => setSelId(null)}
+                />
+              </div>
+            )}
+            </Fragment>
           ))}
         </div>
       </div>
 
-      <div className="items-detail-pane" ref={detailRef}>
-        {selected ? (
-          <ItemDetail
-            item={selected}
-            onEdit={() => setEditItem(selected)}
-            onClosed={() => setSelId(null)}
-          />
-        ) : (
-          <p className="muted pad">Select an item, or add a new one.</p>
-        )}
-      </div>
+      {!narrow && (
+        <div className="items-detail-pane">
+          {selected ? (
+            <ItemDetail
+              item={selected}
+              onEdit={() => setEditItem(selected)}
+              onClosed={() => setSelId(null)}
+            />
+          ) : (
+            <p className="muted pad">Select an item, or add a new one.</p>
+          )}
+        </div>
+      )}
 
       {pickType && (
         <Modal title="What do you want to store?" onClose={() => setPickType(false)}>
