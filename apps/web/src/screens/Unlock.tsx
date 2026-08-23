@@ -15,6 +15,7 @@ import {
   resetUnlockFails,
 } from "../lib/config";
 import { idbAdapter } from "../lib/storage";
+import { storeOptions } from "../lib/device";
 
 type Mode = "password" | "recovery" | "restore";
 type RecoveryStage = "key" | "post";
@@ -65,7 +66,7 @@ export function Unlock(props: { blob: string; onUnlocked: (s: VaultStore) => voi
     setErr("");
     await new Promise((r) => setTimeout(r, 30));
     try {
-      const store = await VaultStore.open(props.blob, { password: pwd }, idbAdapter);
+      const store = await VaultStore.open(props.blob, { password: pwd }, idbAdapter, storeOptions());
       await finishUnlock(store);
     } catch (e) {
       if (e instanceof WrongCredentialError) {
@@ -86,7 +87,7 @@ export function Unlock(props: { blob: string; onUnlocked: (s: VaultStore) => voi
     setErr("");
     await new Promise((r) => setTimeout(r, 30));
     try {
-      const store = await VaultStore.open(props.blob, { recoveryKey: recKey }, idbAdapter);
+      const store = await VaultStore.open(props.blob, { recoveryKey: recKey }, idbAdapter, storeOptions());
       setRecStore(store);
       setRecStage("post");
       setBusy(false);

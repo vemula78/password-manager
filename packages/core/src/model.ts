@@ -128,3 +128,16 @@ export const DEFAULT_SETTINGS: VaultSettings = {
 export const MAX_VERSIONS_PER_ITEM = 20;
 export const MAX_PASSWORD_HISTORY = 20;
 export const MAX_AUDIT_EVENTS = 1000;
+
+/**
+ * Deletion tombstone (V2 sync). A hard delete cannot simply drop the item: another device
+ * that still holds it would push it back and resurrect a credential the user deliberately
+ * destroyed. Tombstones are retained TOMBSTONE_RETENTION_DAYS, then garbage-collected.
+ */
+export interface Tombstone {
+  id: string;
+  deletedAt: string;
+  deviceId: string;
+}
+
+export const TOMBSTONE_RETENTION_DAYS = 180;

@@ -26,6 +26,8 @@ import {
   MAX_AUDIT_EVENTS,
   MAX_PASSWORD_HISTORY,
   MAX_VERSIONS_PER_ITEM,
+  TOMBSTONE_RETENTION_DAYS,
+  Tombstone,
   VaultItem,
   VaultSettings,
 } from "./model";
@@ -33,10 +35,30 @@ import { TEMPLATES } from "./templates";
 
 export interface VaultFile {
   format: "pwm-vault";
+  /**
+   * Vault FILE version. Absent means v1 (pre-sync). v2 adds deletion tombstones. The KEY
+   * hierarchy is unchanged, so `header.version` stays 1 — only the envelope around it grew.
+   * v1 files migrate transparently on open (empty tombstone list).
+   */
+  fileVersion?: 2;
   header: VaultHeader;
   items: { id: string; ct: Ciphertext }[];
+  /** V2 sync: hard deletes leave a tombstone so other devices cannot resurrect the item. */
+  deletions?: Tombstone[];
   audit: Ciphertext | null;
   settings: Ciphertext | null;
+}
+
+export const VAULT_FILE_VERSION = 2 as const;
+
+export interface VaultStoreOptions {
+  /**
+   * Stable per-device identifier, used to attribute tombstones and conflict copies. It is
+   * LOCAL to the device and deliberately not part of synced settings. Shells generate one
+   * once and keep it in ordinary (non-sensitive) local storage.
+   */
+  deviceId?: string;
+  now?: () => string;
 }
 
 export interface StorageAdapter {
@@ -75,6 +97,15 @@ export class VaultStore {
   private now: () => string;
   private unlockedVia: "password" | "recovery";
   private integrityWarnings: string[] = [];
+  private deletions: Map<string, Tombstone>;
+  private deviceId: string;
+  /**
+   * Cached ciphertext per item. Without this, serialize() re-encrypts EVERY item (fresh
+   * nonce) on EVERY mutation, so all ciphertexts change when one item is edited — which
+   * makes per-item sync impossible and costs an O(n) encrypt on each save. Entries are
+   * invalidated by markDirty() whenever the item actually changes.
+   */
+  private ctCache: Map<string, Ciphertext>;
 
   private constructor(
     header: VaultHeader,
@@ -85,6 +116,9 @@ export class VaultStore {
     storage: StorageAdapter,
     now: () => string,
     unlockedVia: "password" | "recovery",
+    deviceId: string,
+    deletions: Tombstone[],
+    ctCache: Map<string, Ciphertext>,
   ) {
     this.header = header;
     this.keys = keys;
@@ -94,15 +128,27 @@ export class VaultStore {
     this.storage = storage;
     this.now = now;
     this.unlockedVia = unlockedVia;
+    this.deviceId = deviceId;
+    this.deletions = new Map(deletions.map((d) => [d.id, d]));
+    this.ctCache = ctCache;
+  }
+
+  /** Drop the cached ciphertext for an item so serialize() re-encrypts it with a fresh nonce. */
+  private markDirty(id: string): void {
+    this.ctCache.delete(id);
   }
 
   static async create(
     masterPassword: string,
     storage: StorageAdapter,
-    now: () => string = () => new Date().toISOString(),
+    nowOrOpts: (() => string) | VaultStoreOptions = () => new Date().toISOString(),
   ): Promise<VaultStore> {
+    const { now, deviceId } = normalizeOptions(nowOrOpts);
     const { header, keys } = createVaultHeader(masterPassword, now());
-    const store = new VaultStore(header, keys, [], [], structuredClone(DEFAULT_SETTINGS), storage, now, "password");
+    const store = new VaultStore(
+      header, keys, [], [], structuredClone(DEFAULT_SETTINGS), storage, now, "password",
+      deviceId, [], new Map(),
+    );
     store.log("vault_created");
     await store.persist();
     return store;
@@ -112,8 +158,9 @@ export class VaultStore {
     serialized: string,
     credential: { password: string } | { recoveryKey: string },
     storage: StorageAdapter,
-    now: () => string = () => new Date().toISOString(),
+    nowOrOpts: (() => string) | VaultStoreOptions = () => new Date().toISOString(),
   ): Promise<VaultStore> {
+    const { now, deviceId } = normalizeOptions(nowOrOpts);
     const file = parseVaultFile(serialized);
     const keys =
       "password" in credential
@@ -124,9 +171,17 @@ export class VaultStore {
     const settings = file.settings
       ? { ...structuredClone(DEFAULT_SETTINGS), ...decryptJson<Partial<VaultSettings>>(file.settings, keys.vk, AD_SETTINGS) }
       : structuredClone(DEFAULT_SETTINGS);
+    // v1 → v2 migration is implicit: no tombstones existed, so the list starts empty.
+    // Expired tombstones are garbage-collected on open by whichever device notices first.
+    const cutoff = new Date(Date.parse(now()) - TOMBSTONE_RETENTION_DAYS * 86_400_000);
+    const deletions = (file.deletions ?? []).filter((d) => new Date(d.deletedAt) >= cutoff);
+    // Seed the ciphertext cache from the file: every item is clean at open time, so nothing
+    // is re-encrypted until it is actually edited.
+    const ctCache = new Map(file.items.map((e) => [e.id, e.ct]));
     const store = new VaultStore(
       file.header, keys, items, audit, settings, storage, now,
       "password" in credential ? "password" : "recovery",
+      deviceId, deletions, ctCache,
     );
     // Recovery-stripping detection: the encrypted settings remember which recovery key
     // should exist; if the plaintext header no longer agrees, the file was tampered with.
@@ -150,14 +205,25 @@ export class VaultStore {
 
   // ---- serialization -------------------------------------------------------
 
+  /** Cached ciphertext for a clean item; encrypt (and cache) only if it was marked dirty. */
+  private ciphertextFor(item: VaultItem): Ciphertext {
+    const cached = this.ctCache.get(item.id);
+    if (cached) return cached;
+    const ct = encryptJson(item, this.keys.vk, adItem(item.id));
+    this.ctCache.set(item.id, ct);
+    return ct;
+  }
+
   serialize(): string {
     const file: VaultFile = {
       format: "pwm-vault",
+      fileVersion: VAULT_FILE_VERSION,
       header: this.header,
       items: [...this.items.values()].map((item) => ({
         id: item.id,
-        ct: encryptJson(item, this.keys.vk, adItem(item.id)),
+        ct: this.ciphertextFor(item),
       })),
+      deletions: [...this.deletions.values()],
       audit: encryptJson(this.audit, this.keys.vk, AD_AUDIT),
       settings: encryptJson(this.settings, this.keys.vk, AD_SETTINGS),
     };
@@ -226,6 +292,8 @@ export class VaultStore {
       lastUsedAt: null,
     };
     this.items.set(item.id, item);
+    this.deletions.delete(item.id);
+    this.markDirty(item.id);
     this.log("item_created", item.title);
     await this.persist();
     return item;
@@ -255,6 +323,7 @@ export class VaultStore {
     }
 
     Object.assign(item, changes, { updatedAt: t });
+    this.markDirty(id);
     this.log("item_edited", item.title);
     await this.persist();
     return item;
@@ -264,6 +333,9 @@ export class VaultStore {
     const item = this.items.get(id);
     if (!item) return;
     this.items.delete(id);
+    this.markDirty(id);
+    // Tombstone, not a silent drop: another device holding this item must not resurrect it.
+    this.deletions.set(id, { id, deletedAt: this.now(), deviceId: this.deviceId });
     this.log("item_deleted", item.title);
     await this.persist();
   }
@@ -273,6 +345,7 @@ export class VaultStore {
     if (!item) return;
     item.archived = archived;
     item.updatedAt = this.now();
+    this.markDirty(id);
     this.log(archived ? "item_archived" : "item_restored", item.title);
     await this.persist();
   }
@@ -281,6 +354,7 @@ export class VaultStore {
     const item = this.items.get(id);
     if (!item) return;
     item.lastUsedAt = this.now();
+    this.markDirty(id);
     await this.persist();
   }
 
@@ -332,6 +406,56 @@ export class VaultStore {
     await this.persist();
   }
 
+  // ---- sync surface (V2) ---------------------------------------------------
+  // These exist so packages/sync can push/pull per-item ciphertext and merge decrypted
+  // items WITHOUT re-implementing any crypto. All encryption stays here, under VK.
+
+  getDeviceId(): string {
+    return this.deviceId;
+  }
+
+  getDeletions(): Tombstone[] {
+    return [...this.deletions.values()];
+  }
+
+  /** Per-item ciphertext for upload. Uses the cache, so clean items keep a stable ct. */
+  getItemCiphertexts(): { id: string; ct: Ciphertext }[] {
+    return [...this.items.values()].map((item) => ({ id: item.id, ct: this.ciphertextFor(item) }));
+  }
+
+  /** Decrypt an item pulled from the server. Throws if the ciphertext fails authentication. */
+  decryptItem(id: string, ct: Ciphertext): VaultItem {
+    return decryptJson<VaultItem>(ct, this.keys.vk, adItem(id));
+  }
+
+  /**
+   * Replace the whole item set and tombstone list after a merge, in one persist. The caller
+   * (packages/sync) has already decided the outcome; this only commits it. Ciphertext for
+   * items whose object identity is unchanged stays cached, so an incoming merge does not
+   * churn every ciphertext.
+   */
+  async applyMerge(
+    items: VaultItem[],
+    deletions: Tombstone[],
+    changedIds: Iterable<string>,
+  ): Promise<void> {
+    for (const id of changedIds) this.markDirty(id);
+    this.items = new Map(items.map((i) => [i.id, i]));
+    this.deletions = new Map(deletions.map((d) => [d.id, d]));
+    // Drop cache entries for items that no longer exist.
+    for (const id of [...this.ctCache.keys()]) if (!this.items.has(id)) this.ctCache.delete(id);
+    await this.persist();
+  }
+
+  /** Replace the header after pulling a remote password/recovery change. Keys are unchanged. */
+  setHeader(header: VaultHeader): void {
+    this.header = header;
+  }
+
+  getSettings(): VaultSettings {
+    return this.settings;
+  }
+
   // ---- keys / recovery -----------------------------------------------------
 
   /**
@@ -365,6 +489,17 @@ export class VaultStore {
     this.log("master_password_changed");
     await this.persist();
   }
+}
+
+function normalizeOptions(
+  nowOrOpts: (() => string) | VaultStoreOptions,
+): { now: () => string; deviceId: string } {
+  const opts: VaultStoreOptions = typeof nowOrOpts === "function" ? { now: nowOrOpts } : nowOrOpts;
+  return {
+    now: opts.now ?? (() => new Date().toISOString()),
+    // "local" is the pre-sync default: single-device vaults never compare device ids.
+    deviceId: opts.deviceId ?? "local",
+  };
 }
 
 export function parseVaultFile(serialized: string): VaultFile {

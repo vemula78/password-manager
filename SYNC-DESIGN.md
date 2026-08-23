@@ -109,8 +109,8 @@ Consequences to handle explicitly:
 Monotonic revision counter per account, assigned by the server. Clients store `lastSyncRev`.
 
 ```
-GET  /vault/changes?since=<rev>   → { rev, header?, items:[{id, ct, updatedAt, rev}],
-                                      deletions:[…], settings?, auditShards:[…] }
+GET  /vault/changes?since=<rev>   → { rev, headerRev, header?, items:[{id, ct, rev}],
+                                      deletions:[…], settings? }
 POST /vault/changes               → { baseRev, items:[…], deletions:[…], settings? }
                                     409 if baseRev != server rev  → client re-pulls, merges, retries
 POST /vault/header                → strict compare-and-set on header rev (password/recovery change)
@@ -141,11 +141,20 @@ destroyed — the cost of a wrong LWW call is a spurious duplicate, not data los
 
 ### Audit log and settings
 
-- **Audit**: sharded per device (`auditShards[deviceId]`), each shard append-only and
-  encrypted under VK. Merge = concatenate shards, sort by timestamp, cap at
-  `MAX_AUDIT_EVENTS`. Append-only shards cannot conflict, so this needs no resolution logic.
+- **Audit**: **not synced** (revised 23-Aug-2026 during implementation). The design originally
+  called for per-device append-only shards merged on read. That is sound but buys little: the
+  audit log is a record of what happened *on this device*, and a merged cross-device log is a
+  reporting nicety, not a security control. Each device keeps its own local log. Revisit if
+  cross-device forensics is ever wanted; the shard design above still applies.
 - **Settings**: single blob, last-writer-wins. Low stakes; a lost theme preference is not a
   credential.
+
+### Metadata minimisation on the wire (revised 23-Aug-2026)
+
+The protocol carries **no plaintext `updatedAt` per item**, contrary to the first draft of §5.
+The merge runs client-side on decrypted items, so the server never needs item timestamps —
+sending them would have leaked a per-item edit history for no functional benefit. The server
+orders purely by its own `rev`. Row count and *aggregate* write timing remain visible (§8).
 
 ## 6. Data model (Postgres)
 

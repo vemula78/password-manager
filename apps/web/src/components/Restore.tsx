@@ -12,6 +12,7 @@ import { useEffect, useRef, useState } from "react";
 import { connectDrive, driveConnected, getDriveClient } from "../lib/gdrive";
 import { loadConfig, recordFailedUnlock, resetUnlockFails } from "../lib/config";
 import { idbAdapter, saveVaultBlob } from "../lib/storage";
+import { storeOptions } from "../lib/device";
 import { PostRecoveryFlow } from "./PostRecoveryFlow";
 import { formatDateTime, Warning } from "./ui";
 
@@ -102,7 +103,7 @@ export function RestorePanel(props: {
         credKind === "password" ? { password: secret } : { recoveryKey: secret };
       const { vaultSerialized } = restoreBackup(backupText, credential);
       await saveVaultBlob(vaultSerialized);
-      const store = await VaultStore.open(vaultSerialized, credential, idbAdapter);
+      const store = await VaultStore.open(vaultSerialized, credential, idbAdapter, storeOptions());
       await store.logAndPersist("restore_completed");
       setConfig(resetUnlockFails(config));
       if (credKind === "recoveryKey") {

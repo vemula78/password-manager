@@ -7,6 +7,7 @@ import { RestorePanel } from "../components/Restore";
 import { StrengthMeter, Warning } from "../components/ui";
 import { loadConfig } from "../lib/config";
 import { idbAdapter } from "../lib/storage";
+import { storeOptions } from "../lib/device";
 
 // Spec §Warnings — shown verbatim on the skip path.
 const SKIP_WARNING =
@@ -34,7 +35,7 @@ export function Onboarding(props: { onUnlocked: (s: VaultStore) => void }) {
     setErr("");
     await new Promise((r) => setTimeout(r, 30)); // Argon2id takes ~1s; let UI paint
     try {
-      const s = await VaultStore.create(pwd, idbAdapter);
+      const s = await VaultStore.create(pwd, idbAdapter, storeOptions());
       const key = await s.createRecoveryKey({ masterPassword: pwd });
       s.log("recovery_key_viewed");
       await s.persist();
