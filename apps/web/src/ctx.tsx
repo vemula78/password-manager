@@ -144,6 +144,7 @@ export function AppProvider(props: {
     updateConfig,
     toast,
     props.authTokenB64,
+    props.onAuthToken,
   );
 
   // Sync on unlock, then on a slow timer. Deliberately not on every keystroke-save: each

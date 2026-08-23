@@ -39,7 +39,8 @@ function OptionRow({ label, options, value, onChange, fmt }: {
 
 export function SettingsScreen({ navigation }: ScreenProps<"Settings">) {
   const store = useStore();
-  const { lock, prefs, setPrefs, reauth, reauthPassword, refresh, enableBiometrics, disableBiometrics } = useVault();
+  const { lock, prefs, setPrefs, reauth, reauthPassword, refresh, enableBiometrics, disableBiometrics, pushSyncHeader } =
+    useVault();
   const [bioAvailable, setBioAvailable] = useState(false);
   const [bioLabel, setBioLabel] = useState("Biometric unlock");
 
@@ -84,12 +85,31 @@ export function SettingsScreen({ navigation }: ScreenProps<"Settings">) {
     try {
       await store.changeMasterPassword(newPw, { masterPassword: currentPw });
       if (prefs.biometricEnabled) await enableBiometrics(newPw); // refresh cached credential
+
+      // Rotate the sync server's header and auth verifier in the same breath. Skipping this
+      // leaves the server on the OLD header, so the OLD password keeps working against it
+      // and no other device ever learns about the change — a half-succeeded password change
+      // has to be stated plainly, never swallowed.
+      let syncWarning: string | null = null;
+      try {
+        await pushSyncHeader(newPw);
+      } catch (e) {
+        syncWarning =
+          "\n\nYour master password was changed on this device, but the sync server could not " +
+          "be updated: " +
+          (e instanceof Error ? e.message : String(e)) +
+          " Your old password still works for sync until you retry from Settings → Sync.";
+      }
+
       setChangingPw(false);
       setCurrentPw("");
       setNewPw("");
       setConfirmPw("");
       refresh();
-      Alert.alert("Done", "Master password changed.");
+      Alert.alert(
+        syncWarning ? "Changed locally only" : "Done",
+        "Master password changed." + (syncWarning ?? ""),
+      );
     } catch (e) {
       setPwError(e instanceof Error ? e.message : "Could not change the password.");
     } finally {

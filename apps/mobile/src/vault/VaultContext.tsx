@@ -52,6 +52,7 @@ const PLACEHOLDER_IDENTITY: SyncIdentity = {
     accountId: "",
     lastSyncRev: 0,
     highestSeenRev: 0,
+    lastHeaderRev: 0,
     lastSyncAt: null,
     lastError: null,
   },
@@ -92,6 +93,13 @@ interface VaultContextValue {
   authTokenB64: string | null;
   syncStatus: SyncStatus;
   syncNow: (opts?: { silent?: boolean }) => Promise<void>;
+  /**
+   * Rotate the sync server's header and auth verifier after a master-password change.
+   * Resolves to null when sync is off; throws when the server could not be updated, which
+   * the caller must surface — the old password keeps working against the server until it
+   * succeeds.
+   */
+  pushSyncHeader: (newMasterPassword: string) => Promise<void | null>;
 }
 
 const Ctx = createContext<VaultContextValue | null>(null);
@@ -237,8 +245,10 @@ export function VaultProvider({ children }: { children: React.ReactNode }) {
   const unlockWithRecoveryKey = useCallback(
     async (recoveryKey: string) => {
       // Recovery-key unlock does not yield a KEK, so it cannot produce an auth token
-      // (SYNC-DESIGN.md §4). A device recovering this way must set a new master password
-      // before it can sync — the existing forced post-recovery flow already requires that.
+      // (SYNC-DESIGN.md §4). Setting a new master password afterwards does NOT restore sync
+      // either: pushing the rotated header requires authenticating with the OLD token, which
+      // this device never had. The account has to be reset on the server. The post-recovery
+      // flow warns about this — see NOTES/post-recovery-sync-gap.md.
       const s = await VaultStore.open(readVault(), { recoveryKey }, fileStorage, {
         deviceId: syncIdentity.deviceId,
       });
@@ -359,7 +369,13 @@ export function VaultProvider({ children }: { children: React.ReactNode }) {
     setPwInput("");
   }, [pwPrompt]);
 
-  const { status: syncStatus, syncNow } = useSync(store, syncIdentity, updateSyncConfig, authTokenB64);
+  const { status: syncStatus, syncNow, pushHeaderNow } = useSync(
+    store,
+    syncIdentity,
+    updateSyncConfig,
+    authTokenB64,
+    setAuthTokenB64,
+  );
 
   // Trigger a sync on unlock (once authTokenB64 is available), silently — failures surface
   // via syncStatus.lastError in the Sync settings screen, not a popup on every launch.
@@ -412,11 +428,12 @@ export function VaultProvider({ children }: { children: React.ReactNode }) {
       authTokenB64,
       syncStatus,
       syncNow,
+      pushSyncHeader: pushHeaderNow,
     }),
     [status, errorMessage, store, tick, refresh, prefs, setPrefs, createVault, unlockWithPassword,
      unlockWithRecoveryKey, unlockWithBiometrics, lock, adoptStore, enableBiometrics,
      disableBiometrics, reauth, reauthPassword, syncIdentity, updateSyncConfig, authTokenB64,
-     syncStatus, syncNow],
+     syncStatus, syncNow, pushHeaderNow],
   );
 
   return (

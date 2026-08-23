@@ -10,6 +10,7 @@ import { clearStoredMasterPassword } from "../security/biometric";
 import { Button, Field, StrengthBar, WarningBanner } from "../components/ui";
 import { RecoveryKeyCard } from "../components/RecoveryKeyCard";
 import { colors, spacing } from "../theme";
+import { POST_RECOVERY_SYNC_MESSAGE, markSyncStaleAfterRecovery } from "../sync/config";
 
 export function RecoverScreen({ onCancel }: { onCancel: () => void }) {
   usePreventScreenCapture("recover");
@@ -22,6 +23,7 @@ export function RecoverScreen({ onCancel }: { onCancel: () => void }) {
   const [newRecoveryKey, setNewRecoveryKey] = useState<string | null>(null);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
+  const [syncStale, setSyncStale] = useState(false);
 
   const strength = useMemo(() => estimateStrength(newPassword), [newPassword]);
 
@@ -53,6 +55,7 @@ export function RecoverScreen({ onCancel }: { onCancel: () => void }) {
     setBusy(true);
     try {
       await store.changeMasterPassword(newPassword);
+      setSyncStale(markSyncStaleAfterRecovery());
       // Any biometric-cached master password is now stale — remove it.
       await clearStoredMasterPassword();
       setPrefs({ biometricEnabled: null }); // re-offer on next password unlock
@@ -72,6 +75,7 @@ export function RecoverScreen({ onCancel }: { onCancel: () => void }) {
     return (
       <ScrollView style={styles.screen} contentContainerStyle={styles.content}>
         <WarningBanner text="Your master password was changed and a NEW recovery key was generated. The old recovery key no longer works." />
+        {syncStale && <WarningBanner text={POST_RECOVERY_SYNC_MESSAGE} />}
         <RecoveryKeyCard
           recoveryKey={newRecoveryKey}
           clipboardClearSeconds={store.settings.clipboardClearSeconds}

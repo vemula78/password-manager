@@ -3,7 +3,13 @@
 // vault fully usable locally.
 import { useCallback, useRef, useState } from "react";
 import type { VaultStore } from "@pw/core";
-import { RollbackDetectedError, SyncAuthError, SyncClient, type SyncOutcome } from "@pw/sync";
+import {
+  RollbackDetectedError,
+  SyncAuthError,
+  SyncClient,
+  deriveAuthToken,
+  type SyncOutcome,
+} from "@pw/sync";
 import type { SyncIdentity } from "./config";
 import { loadSyncBase, saveSyncBase } from "./base";
 
@@ -18,6 +24,12 @@ export function useSync(
   identity: SyncIdentity,
   updateSyncConfig: (patch: Partial<SyncIdentity["sync"]>) => void,
   authTokenB64: string | null,
+  /**
+   * Replaces the in-memory auth token after a password change. Without this the app keeps
+   * the OLD token, so the next re-login (session expiry, or a sync after the client was
+   * rebuilt) authenticates with a credential the server no longer accepts.
+   */
+  onAuthToken: (token: string) => void,
 ) {
   const [status, setStatus] = useState<SyncStatus>({ busy: false, lastError: null, lastOutcome: null });
   const clientRef = useRef<SyncClient | null>(null);
@@ -59,7 +71,11 @@ export function useSync(
         const base = loadSyncBase();
         const res = await c.sync(
           store,
-          { lastSyncRev: identity.sync.lastSyncRev, highestSeenRev: identity.sync.highestSeenRev },
+          {
+            lastSyncRev: identity.sync.lastSyncRev,
+            highestSeenRev: identity.sync.highestSeenRev,
+            lastHeaderRev: identity.sync.lastHeaderRev,
+          },
           base,
         );
 
@@ -67,6 +83,7 @@ export function useSync(
         updateSyncConfig({
           lastSyncRev: res.state.lastSyncRev,
           highestSeenRev: res.state.highestSeenRev,
+          lastHeaderRev: res.state.lastHeaderRev ?? identity.sync.lastHeaderRev,
           lastSyncAt: new Date().toISOString(),
           lastError: null,
         });
@@ -99,5 +116,42 @@ export function useSync(
     [store, identity, updateSyncConfig, authTokenB64, client],
   );
 
-  return { status, syncNow };
+  /**
+   * Push a rotated header (master-password change) to the server, atomically with the new
+   * auth verifier. Mirrors apps/web/src/lib/sync.ts. Without this the server keeps the OLD
+   * header, the OLD password stays valid against it, and other devices never learn about
+   * the change — the single most dangerous way for a password change to half-succeed.
+   *
+   * Returns null when sync is off (nothing to do); otherwise throws on failure so the caller
+   * can tell the user the password changed locally but NOT on the server.
+   */
+  const pushHeaderNow = useCallback(
+    async (newMasterPassword: string): Promise<void | null> => {
+      const { enabled, serverUrl, accountId } = identity.sync;
+      if (!enabled || !serverUrl || !accountId || !store) return null;
+
+      const c = client();
+      const newToken = deriveAuthToken(newMasterPassword, store.getHeader().kdf);
+      if (!c.isSignedIn()) {
+        // Sign in with the OLD token — the server has not rotated yet.
+        if (!authTokenB64) throw new SyncAuthError("Not signed in to the sync server.");
+        await c.login(accountId, authTokenB64);
+      }
+      const res = await c.pushHeader(
+        store,
+        {
+          lastSyncRev: identity.sync.lastSyncRev,
+          highestSeenRev: identity.sync.highestSeenRev,
+          lastHeaderRev: identity.sync.lastHeaderRev,
+        },
+        newToken,
+      );
+      updateSyncConfig({ lastHeaderRev: res.state.lastHeaderRev ?? 0, lastError: null });
+      onAuthToken(newToken);
+      return;
+    },
+    [store, identity, updateSyncConfig, authTokenB64, client, onAuthToken],
+  );
+
+  return { status, syncNow, pushHeaderNow };
 }

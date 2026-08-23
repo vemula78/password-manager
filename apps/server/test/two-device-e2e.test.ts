@@ -62,7 +62,7 @@ interface Device {
   store: VaultStoreType;
   client: SyncClient;
   storage: ReturnType<typeof memStorage>;
-  state: { lastSyncRev: number; highestSeenRev: number };
+  state: { lastSyncRev: number; highestSeenRev: number; lastHeaderRev?: number };
   base: SyncBase;
   sync(): Promise<Awaited<ReturnType<SyncClient["sync"]>>["outcome"]>;
 }
@@ -259,5 +259,78 @@ describe("two devices, one vault", () => {
     expect(dump).not.toContain("Very Secret Bank");
     expect(dump).not.toContain("praveen");
     expect(dump).not.toContain(PW);
+  });
+  // --- master-password change ------------------------------------------------
+  // The acceptance test for the pushHeader call sites. A password change that updates only
+  // the local vault leaves the OLD password valid against the server forever and every other
+  // device stranded on the old header — the most dangerous way for this to half-succeed.
+  describe("master-password change", () => {
+    const NEW_PW = "a completely different passphrase 99";
+
+    it("rotates the server's header and verifier, retiring the old password", async () => {
+      await A.store.addItem({ type: "login", title: "Gmail", fields: { password: "s3cret" } });
+      await A.sync();
+
+      await A.store.changeMasterPassword(NEW_PW, { masterPassword: PW });
+      const newToken = deriveAuthToken(NEW_PW, A.store.getHeader().kdf);
+      await A.client.pushHeader(A.store, A.state, newToken);
+
+      // The old credential must stop working, or the change bought nothing.
+      const stale = new SyncClient({
+        fetch: injectFetch(app),
+        serverUrl: "http://sync.test",
+        deviceId: "device-A",
+        deviceLabel: "Mac Chrome",
+      });
+      await expect(stale.login(accountId, authToken)).rejects.toThrow();
+
+      const fresh = new SyncClient({
+        fetch: injectFetch(app),
+        serverUrl: "http://sync.test",
+        deviceId: "device-A",
+        deviceLabel: "Mac Chrome",
+      });
+      await fresh.login(accountId, newToken);
+      expect(fresh.isSignedIn()).toBe(true);
+    });
+
+    it("tells the other device to re-unlock, and keeps saying so until it does", async () => {
+      await A.sync();
+      await B.sync();
+
+      await A.store.changeMasterPassword(NEW_PW, { masterPassword: PW });
+      const newToken = deriveAuthToken(NEW_PW, A.store.getHeader().kdf);
+      const pushed = await A.client.pushHeader(A.store, A.state, newToken);
+      A.state = pushed.state;
+
+      // B is still on the old header. It must be warned...
+      authToken = newToken; // B re-logins with whatever the server now accepts
+      const first = await B.sync();
+      expect(first.warnings.join(" ")).toMatch(/master password|recovery key/i);
+
+      // ...and must keep being warned, because it has NOT acted on the rotation yet.
+      // Advancing lastHeaderRev here would make the warning vanish after one sync while the
+      // device stayed on the old credential.
+      const second = await B.sync();
+      expect(second.warnings.join(" ")).toMatch(/master password|recovery key/i);
+    });
+
+    it("stops re-sending the header to the device that already has it", async () => {
+      await A.store.changeMasterPassword(NEW_PW, { masterPassword: PW });
+      const newToken = deriveAuthToken(NEW_PW, A.store.getHeader().kdf);
+      authToken = newToken;
+      const pushed = await A.client.pushHeader(A.store, A.state, newToken);
+      A.state = pushed.state;
+
+      // A holds this header itself, so it must record the revision and go quiet. A client
+      // that never tracks lastHeaderRev (mobile did not) re-pulls the header on every sync.
+      const first = await A.sync();
+      expect(first.warnings).toEqual([]);
+      expect(A.state.lastHeaderRev).toBe(pushed.headerRev);
+
+      const second = await A.sync();
+      expect(second.warnings).toEqual([]);
+      expect(A.state.lastHeaderRev).toBe(pushed.headerRev);
+    });
   });
 });

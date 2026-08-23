@@ -4,10 +4,40 @@
 // backup using its recovery key) so the two paths behave identically.
 import { type VaultStore } from "@pw/core";
 import { useState } from "react";
+import { loadConfig, saveConfig } from "../lib/config";
 import { KitOverlay, kitFromStore } from "./Kit";
 import { StrengthMeter, Warning } from "./ui";
 
 type Stage = "newpass" | "rotate";
+
+/**
+ * Sync cannot follow a recovery-key unlock. The server credential is
+ * deriveSubkey(KEK, "server-auth") and the KEK comes only from the master password
+ * (SYNC-DESIGN.md §4), so a device unlocked by recovery key holds nothing the server will
+ * accept — it cannot authenticate, and therefore cannot push the rotated header even after
+ * the user sets a new password here. The server keeps the OLD header and the OLD password
+ * keeps working against it.
+ *
+ * There is no in-app fix for that today; closing it needs a recovery-derived verifier
+ * stored server-side (see NOTES/post-recovery-sync-gap.md). What must NOT happen is
+ * silence: record the condition and tell the user, so they know sync is stale rather than
+ * assuming their password change took effect everywhere.
+ */
+function markSyncStaleAfterRecovery(): boolean {
+  const cfg = loadConfig();
+  if (!cfg.sync.enabled || !cfg.sync.accountId) return false;
+  saveConfig({
+    ...cfg,
+    sync: {
+      ...cfg.sync,
+      lastError:
+        "Your master password was changed after a recovery-key unlock, but the sync server " +
+        "still has the old one. This device cannot update it. Reset the account on the sync " +
+        "server, then connect this device again.",
+    },
+  });
+  return true;
+}
 
 export function PostRecoveryFlow(props: {
   store: VaultStore;
@@ -21,6 +51,7 @@ export function PostRecoveryFlow(props: {
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
   const [kit, setKit] = useState<ReturnType<typeof kitFromStore> | null>(null);
+  const [syncStale, setSyncStale] = useState(false);
 
   const setNewMasterPassword = async () => {
     setBusy(true);
@@ -28,6 +59,7 @@ export function PostRecoveryFlow(props: {
     await new Promise((r) => setTimeout(r, 30));
     try {
       await store.changeMasterPassword(newPwd);
+      setSyncStale(markSyncStaleAfterRecovery());
       setStage("rotate");
       setBusy(false);
     } catch (e) {
@@ -108,6 +140,14 @@ export function PostRecoveryFlow(props: {
   return (
     <div>
       <h2>Rotate your recovery key?</h2>
+      {syncStale && (
+        <Warning>
+          Sync was not updated. Because you unlocked with a recovery key, this device cannot
+          prove itself to the sync server, so the server still holds your old master
+          password and other devices will not see the change. Reset the account on the sync
+          server, then connect this device again.
+        </Warning>
+      )}
       <Warning>
         The recovery key you just used still works. If it may have been seen by anyone
         else, rotate it now and print a fresh emergency kit.

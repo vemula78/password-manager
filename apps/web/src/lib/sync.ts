@@ -25,6 +25,12 @@ export function useSync(
   updateConfig: (patch: Partial<AppConfig>) => void,
   toast: (msg: string, kind?: "info" | "success" | "error") => void,
   authTokenB64: string | null,
+  /**
+   * Replaces the in-memory auth token after a password change. Without this the app keeps
+   * the OLD token, so the next re-login (session expiry, or a sync after the client was
+   * rebuilt) authenticates with a credential the server no longer accepts.
+   */
+  onAuthToken: (token: string) => void,
 ) {
   const [status, setStatus] = useState<SyncStatus>({ busy: false, lastError: null, lastOutcome: null });
   const clientRef = useRef<SyncClient | null>(null);
@@ -158,9 +164,10 @@ export function useSync(
       updateConfig({
         sync: { ...config.sync, lastHeaderRev: res.state.lastHeaderRev ?? 0, lastError: null },
       });
+      onAuthToken(newToken);
       return;
     },
-    [store, config, updateConfig, authTokenB64, client],
+    [store, config, updateConfig, authTokenB64, client, onAuthToken],
   );
 
   return { status, syncNow, pushHeaderNow };
