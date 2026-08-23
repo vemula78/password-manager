@@ -60,9 +60,24 @@ it also removes an O(n) encrypt on every keystroke-triggered save.
 still has it, B pushes, the item **resurrects**. Silent resurrection of a credential the user
 deliberately destroyed is a security bug, not a nuisance.
 
-Fix: add `deletions: { id, deletedAt, deviceId }[]` to `VaultFile`. Deletion is a tombstone
-write. Tombstones are retained 180 days (long enough for any realistic offline device), then
-garbage-collected by the client that observes them as expired.
+Fix: add `deletions` to `VaultFile`. Deletion is a tombstone write. Tombstones are retained
+180 days (long enough for any realistic offline device), then garbage-collected by the client
+that observes them as expired.
+
+**Tombstones must be authenticated** (revised 23-Aug-2026 after the independent review found
+this as a critical hole). The first implementation stored them as plaintext
+`{ id, deletedAt, deviceId }`. That let a compromised server invent a tombstone for every
+item id it could see and make every client silently destroy the credential — the exact
+failure this whole design is built to prevent, arriving through the one structure that had no
+integrity protection.
+
+They are now sealed: `{ id, ct }`, where `ct` is an XChaCha20-Poly1305 ciphertext of
+`{ deletedAt, deviceId }` under the Vault Key, with `tombstone:{id}` as associated data. The
+id stays in the clear because the server needs it to key the row and already sees it on the
+item. A forged tombstone has no valid tag; a real tombstone moved onto a different item id
+fails the associated-data check. Either way the client ignores it and raises an integrity
+warning instead of deleting. Sealing also removes deletion timestamps and device attribution
+from the server, which §1 promised and the plaintext form quietly broke.
 
 ### 3.3 File format version bump
 
@@ -204,6 +219,20 @@ authenticate as the user against anything but itself.
   sees a password change. Mitigation: the client stores the highest `rev` it has ever seen and
   refuses to accept a lower one, surfacing a warning. This detects rollback but cannot prevent
   a server that simply stops responding.
+
+  The review sharpened this: the guard only catches a *lower* revision. A server can also
+  return an equal-or-higher rev with items silently missing, which looks like a healthy sync.
+  Because tombstones are now authenticated, a previously-synced item that disappears with no
+  valid tombstone is detectable, and the client refuses to treat it as a deletion. That is a
+  detection mitigation, not a completeness proof — a full fix needs a vault-key-authenticated
+  manifest with a revision hash chain, which is not implemented. Treat sync completeness as
+  best-effort against a hostile server.
+
+- **Test master-password guesses offline**, given a database compromise. The server holds the
+  KDF salt and an Argon2id verifier of the auth token, so an attacker can derive a candidate
+  KEK and check it. The domain separation is sound and the KEK is not algebraically
+  recoverable, but a guessable master password is still guessable. This is inherent to any
+  password-derived credential; the defence is passphrase entropy, not protocol design.
 - **Learn metadata**: number of items, size of each ciphertext, edit frequency and timing,
   device count, IP addresses. Item *count* and *edit patterns* are genuinely revealing. Padding
   ciphertexts to size buckets is deferred; the leak is documented rather than fixed.

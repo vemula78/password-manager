@@ -1,10 +1,12 @@
 # Personal Password Manager (V1)
 
 Open-source, zero-knowledge, offline-first password manager for Indian users — netbanking,
-UPI, cards, demat, and government-ID credentials for individuals and families. No server:
-the vault is encrypted on-device and backed up (encrypted) to the user's own Google Drive.
+UPI, cards, demat, and government-ID credentials for individuals and families. The vault is
+encrypted on-device and backed up (encrypted) to the user's own Google Drive. Optional
+multi-device sync through a server you host yourself, which only ever stores ciphertext.
 
-Full specification: [SPEC.md](SPEC.md) · Build plan and key hierarchy: [PLAN.md](PLAN.md)
+Full specification: [SPEC.md](SPEC.md) · Build plan and key hierarchy: [PLAN.md](PLAN.md) ·
+Sync design: [SYNC-DESIGN.md](SYNC-DESIGN.md) · Security model: [SECURITY.md](SECURITY.md)
 
 ## Layout
 
@@ -13,6 +15,9 @@ Full specification: [SPEC.md](SPEC.md) · Build plan and key hierarchy: [PLAN.md
 | `packages/core` | Shared TypeScript library: all crypto (libsodium — Argon2id, XChaCha20-Poly1305), key hierarchy, vault store, Indian credential templates, password generator/health, encrypted backup format, Google Drive client, emergency kit |
 | `apps/web` | React + Vite PWA (offline-capable, deployable to GitHub Pages) |
 | `apps/mobile` | Expo (React Native) app — biometric unlock, app-lock on background, screenshot protection |
+| `apps/extension` | MV3 browser extension (Chrome/Edge/Firefox) — search, copy, manual fill |
+| `apps/server` | Optional self-hosted sync server (Fastify + Postgres). Stores ciphertext only; holds no keys |
+| `packages/sync` | Sync client: auth-token derivation, conflict-resolving merge engine, pull/merge/push |
 
 ## Security model (short version)
 
@@ -24,16 +29,31 @@ Full specification: [SPEC.md](SPEC.md) · Build plan and key hierarchy: [PLAN.md
   wrapped ("key envelopes") by the KEK and, if configured, by the **Recovery Key**
   (26-character Crockford-base32, shown once, printable in the emergency kit).
 - Backups therefore open with the master password **or** the recovery key — and nothing else.
-  Lose both and the vault is unrecoverable by design; the provider (nobody) can decrypt it.
+  Lose both and the vault is unrecoverable by design; nobody else can decrypt them.
+- **Sync is optional and off by default.** When enabled, the server receives only ciphertext
+  and a one-way auth token derived from the KEK; it cannot decrypt anything, and deletions are
+  authenticated so a hostile server cannot destroy entries. Concurrent edits keep both
+  versions rather than overwriting. Details and limits: [SECURITY.md](SECURITY.md),
+  design: [SYNC-DESIGN.md](SYNC-DESIGN.md).
 
 ## Run
 
 ```bash
 npm install                      # from repo root (npm workspaces)
-npm test                         # core test suite (37 tests)
+npm test                         # core + sync + server test suites
 npm run dev --workspace @pw/web  # web app on http://localhost:5173
 cd apps/mobile && npx expo start # mobile (needs a dev build for native libsodium)
 ```
+
+To try sync locally without Postgres:
+
+```bash
+npm run dev --workspace @pw/server   # in-memory sync server on http://127.0.0.1:8787
+```
+
+Then in the web app: Settings → Sync across devices → server address
+`http://127.0.0.1:8787` → Create sync account. Deploying it for real (Postgres, nginx,
+TLS, CORS allowlist) is covered in [apps/server/README.md](apps/server/README.md).
 
 Google Drive backup needs a (free) OAuth client ID from Google Cloud Console
 (type "Web application", scope `drive.file`); paste it in the web app's Backup screen.
