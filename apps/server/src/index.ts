@@ -120,6 +120,9 @@ export async function buildApp(
     let withinLimit = true;
     if (req.method === "GET" && req.url.startsWith("/kdf")) withinLimit = kdfBucket(ip);
     else if (req.method === "POST" && req.url.startsWith("/register")) withinLimit = registerBucket(ip);
+    // Prefix match, so /login/recovery shares the /login budget. Deliberate: both do Argon2
+    // work for an unauthenticated caller, and one bucket means an attacker cannot double
+    // their guess rate by alternating between the two.
     else if (req.method === "POST" && req.url.startsWith("/login")) withinLimit = loginBucket(ip);
     else if (req.method === "POST" && req.url.startsWith("/refresh")) withinLimit = refreshBucket(ip);
 

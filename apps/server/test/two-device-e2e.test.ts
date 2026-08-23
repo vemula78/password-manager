@@ -10,13 +10,24 @@ import {
   initCrypto,
   restoreBackup,
 } from "@pw/core";
-import { SyncClient, deriveAuthToken, nextSyncBase, type SyncBase } from "@pw/sync";
+import {
+  SyncClient,
+  deriveAuthToken,
+  deriveRecoveryAuthToken,
+  nextSyncBase,
+  type SyncBase,
+} from "@pw/sync";
 import { buildApp } from "../src/index.js";
 import { InMemorySyncRepository } from "../src/memory-repo.js";
 import type { ServerConfig } from "../src/auth.js";
 
 const PW = "correct horse battery staple 42";
-const config: ServerConfig = { serverSecret: Buffer.from("test-secret-at-least-32-bytes-long!!") };
+// registrationOpen: these tests create additional accounts to exercise recovery sign-in.
+// The production default (closed once one account exists) is covered in the route tests.
+const config: ServerConfig = {
+  serverSecret: Buffer.from("test-secret-at-least-32-bytes-long!!"),
+  registrationOpen: true,
+};
 
 beforeAll(async () => {
   await initCrypto();
@@ -39,9 +50,13 @@ const tick = (ms = 1000) => {
   return new Date(clock).toISOString();
 };
 
+/** Every request body sent to the server this test, for "did anything secret leak" checks. */
+const sentBodies: string[] = [];
+
 /** Adapt Fastify's inject() to the fetch shape SyncClient expects. */
 function injectFetch(app: Awaited<ReturnType<typeof buildApp>>): typeof fetch {
   return (async (input: RequestInfo | URL, init: RequestInit = {}) => {
+    if (init.body) sentBodies.push(init.body as string);
     const url = new URL(String(input));
     const res = await app.inject({
       method: (init.method ?? "GET") as "GET" | "POST",
@@ -273,7 +288,7 @@ describe("two devices, one vault", () => {
 
       await A.store.changeMasterPassword(NEW_PW, { masterPassword: PW });
       const newToken = deriveAuthToken(NEW_PW, A.store.getHeader().kdf);
-      await A.client.pushHeader(A.store, A.state, newToken);
+      await A.client.pushHeader(A.store, A.state, { newAuthTokenB64: newToken });
 
       // The old credential must stop working, or the change bought nothing.
       const stale = new SyncClient({
@@ -300,7 +315,7 @@ describe("two devices, one vault", () => {
 
       await A.store.changeMasterPassword(NEW_PW, { masterPassword: PW });
       const newToken = deriveAuthToken(NEW_PW, A.store.getHeader().kdf);
-      const pushed = await A.client.pushHeader(A.store, A.state, newToken);
+      const pushed = await A.client.pushHeader(A.store, A.state, { newAuthTokenB64: newToken });
       A.state = pushed.state;
 
       // B is still on the old header. It must be warned...
@@ -319,7 +334,7 @@ describe("two devices, one vault", () => {
       await A.store.changeMasterPassword(NEW_PW, { masterPassword: PW });
       const newToken = deriveAuthToken(NEW_PW, A.store.getHeader().kdf);
       authToken = newToken;
-      const pushed = await A.client.pushHeader(A.store, A.state, newToken);
+      const pushed = await A.client.pushHeader(A.store, A.state, { newAuthTokenB64: newToken });
       A.state = pushed.state;
 
       // A holds this header itself, so it must record the revision and go quiet. A client
@@ -331,6 +346,149 @@ describe("two devices, one vault", () => {
       const second = await A.sync();
       expect(second.warnings).toEqual([]);
       expect(A.state.lastHeaderRev).toBe(pushed.headerRev);
+    });
+  });
+  // --- recovery-derived verifier (SYNC-DESIGN.md §4) --------------------------
+  // A device that unlocked with a recovery key has no KEK and so no password credential.
+  // Before this existed it was locked out of the server permanently, and the forgotten
+  // master password kept working against the server forever.
+  describe("recovery-key sign-in", () => {
+    const NEW_PW = "the passphrase chosen after recovering";
+
+    /** Fresh account whose recovery verifier was registered at signup. */
+    async function accountWithRecovery() {
+      const storage = memStorage();
+      const store = await VaultStore.create(PW, storage, { now: tick, deviceId: "device-R" });
+      const recoveryKey = await store.createRecoveryKey({ masterPassword: PW });
+      await store.persist();
+      const client = new SyncClient({
+        fetch: injectFetch(app),
+        serverUrl: "http://sync.test",
+        deviceId: "device-R",
+        deviceLabel: "Recovered device",
+      });
+      const id = await client.register(
+        "Recovered device",
+        deriveAuthToken(PW, store.getHeader().kdf),
+        store,
+        deriveRecoveryAuthToken(recoveryKey),
+      );
+      return { store, storage, recoveryKey, client, id };
+    }
+
+    it("lets a recovered device sign in and retire the forgotten password", async () => {
+      const { storage, recoveryKey, id } = await accountWithRecovery();
+
+      // The real shape of this: a device that opened the vault with the recovery key alone.
+      // It has no KEK, so core allows the password change without reauth, and @pw/sync has
+      // no password token it could authenticate with.
+      const store = await VaultStore.open(storage.data!, { recoveryKey }, memStorage(), {
+        now: tick,
+        deviceId: "device-R2",
+      });
+
+      // The user has forgotten PW entirely; all they have is the printed kit.
+      const recovering = new SyncClient({
+        fetch: injectFetch(app),
+        serverUrl: "http://sync.test",
+        deviceId: "device-R2",
+        deviceLabel: "New laptop",
+      });
+      await recovering.loginWithRecovery(id, deriveRecoveryAuthToken(recoveryKey));
+      expect(recovering.isSignedIn()).toBe(true);
+
+      await store.changeMasterPassword(NEW_PW);
+      await recovering.pushHeader(
+        store,
+        { lastSyncRev: 0, highestSeenRev: 0, lastHeaderRev: 0 },
+        { newAuthTokenB64: deriveAuthToken(NEW_PW, store.getHeader().kdf) },
+      );
+
+      // The forgotten password must no longer work against the server...
+      const old = new SyncClient({
+        fetch: injectFetch(app),
+        serverUrl: "http://sync.test",
+        deviceId: "device-R3",
+        deviceLabel: "x",
+      });
+      await expect(old.login(id, deriveAuthToken(PW, { ...store.getHeader().kdf }))).rejects.toThrow();
+
+      // ...and the newly chosen one must.
+      const fresh = new SyncClient({
+        fetch: injectFetch(app),
+        serverUrl: "http://sync.test",
+        deviceId: "device-R4",
+        deviceLabel: "y",
+      });
+      await fresh.login(id, deriveAuthToken(NEW_PW, store.getHeader().kdf));
+      expect(fresh.isSignedIn()).toBe(true);
+    });
+
+    it("rejects a wrong recovery key", async () => {
+      const { store, id } = await accountWithRecovery();
+      const other = await VaultStore.create("unrelated", memStorage(), { now: tick, deviceId: "z" });
+      const wrongKey = await other.createRecoveryKey({ masterPassword: "unrelated" });
+      void store;
+
+      const c = new SyncClient({
+        fetch: injectFetch(app),
+        serverUrl: "http://sync.test",
+        deviceId: "device-R5",
+        deviceLabel: "z",
+      });
+      await expect(c.loginWithRecovery(id, deriveRecoveryAuthToken(wrongKey))).rejects.toThrow();
+    });
+
+    it("refuses recovery sign-in for an account that never registered a verifier", async () => {
+      // accountId here is the shared account from beforeEach, registered WITHOUT one — the
+      // pre-migration case. A missing verifier must read as "wrong credential", never as
+      // "no verifier set, so let them in".
+      const storeR = await VaultStore.create(PW, memStorage(), { now: tick, deviceId: "q" });
+      const someKey = await storeR.createRecoveryKey({ masterPassword: PW });
+      const c = new SyncClient({
+        fetch: injectFetch(app),
+        serverUrl: "http://sync.test",
+        deviceId: "device-R6",
+        deviceLabel: "q",
+      });
+      await expect(
+        c.loginWithRecovery(accountId, deriveRecoveryAuthToken(someKey)),
+      ).rejects.toThrow();
+    });
+
+    it("rotating the recovery key retires the old one against the server", async () => {
+      const { store, recoveryKey, client, id } = await accountWithRecovery();
+
+      const rotated = await store.createRecoveryKey({ masterPassword: PW });
+      await client.pushHeader(
+        store,
+        { lastSyncRev: 0, highestSeenRev: 0, lastHeaderRev: 0 },
+        { newRecoveryAuthTokenB64: deriveRecoveryAuthToken(rotated) },
+      );
+
+      const withOld = new SyncClient({
+        fetch: injectFetch(app),
+        serverUrl: "http://sync.test",
+        deviceId: "device-R7",
+        deviceLabel: "old",
+      });
+      await expect(withOld.loginWithRecovery(id, deriveRecoveryAuthToken(recoveryKey))).rejects.toThrow();
+
+      const withNew = new SyncClient({
+        fetch: injectFetch(app),
+        serverUrl: "http://sync.test",
+        deviceId: "device-R8",
+        deviceLabel: "new",
+      });
+      await withNew.loginWithRecovery(id, deriveRecoveryAuthToken(rotated));
+      expect(withNew.isSignedIn()).toBe(true);
+    });
+
+    it("never sends the recovery key itself to the server", async () => {
+      const { recoveryKey } = await accountWithRecovery();
+      const wire = sentBodies.join("\n");
+      expect(wire).not.toContain(recoveryKey);
+      expect(wire).not.toContain(recoveryKey.replace(/-/g, ""));
     });
   });
 });

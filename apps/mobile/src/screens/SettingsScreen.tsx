@@ -39,7 +39,7 @@ function OptionRow({ label, options, value, onChange, fmt }: {
 
 export function SettingsScreen({ navigation }: ScreenProps<"Settings">) {
   const store = useStore();
-  const { lock, prefs, setPrefs, reauth, reauthPassword, refresh, enableBiometrics, disableBiometrics, pushSyncHeader } =
+  const { lock, prefs, setPrefs, reauth, reauthPassword, refresh, enableBiometrics, disableBiometrics, pushSyncHeader, pushSyncRecoveryVerifier } =
     useVault();
   const [bioAvailable, setBioAvailable] = useState(false);
   const [bioLabel, setBioLabel] = useState("Biometric unlock");
@@ -122,6 +122,22 @@ export function SettingsScreen({ navigation }: ScreenProps<"Settings">) {
     const pw = await reauthPassword("rotate your recovery key");
     if (!pw) return;
     const key = await store.createRecoveryKey({ masterPassword: pw });
+
+    // Register the new recovery verifier alongside the header that now carries the matching
+    // recovery envelopes. This is the only moment the key's bytes exist, so a failure means
+    // recovery sign-in stays unavailable and has to be said out loud.
+    try {
+      await pushSyncRecoveryVerifier(key);
+    } catch (e) {
+      Alert.alert(
+        "Rotated locally only",
+        "Your recovery key was rotated on this device, but the sync server could not be " +
+          "updated: " +
+          (e instanceof Error ? e.message : String(e)) +
+          " Until you retry, this key will not let you recover access to sync.",
+      );
+    }
+
     refresh();
     setRotatedKey(key);
   };

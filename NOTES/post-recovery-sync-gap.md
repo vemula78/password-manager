@@ -1,6 +1,6 @@
-# A device unlocked by recovery key cannot update the sync server
+# A device unlocked by recovery key could not update the sync server
 
-Found 23-Aug-2026 while wiring the remaining `pushHeader` call sites.
+Found and closed 23-Aug-2026, while wiring the remaining `pushHeader` call sites.
 
 ## The gap
 
@@ -19,9 +19,27 @@ server indefinitely, and every other device stays on the old header. The comment
 `VaultContext.unlockWithRecoveryKey` claimed the forced password change was sufficient to
 restore sync. It is not.
 
-## What is implemented today
+## Closed 23-Aug-2026
 
-Nothing that closes it — only that it is no longer silent. `PostRecoveryFlow` (web) and
+Built as described under "The real fix" below: `deriveRecoveryAuthToken` in
+`packages/sync/src/auth.ts`, `recovery_auth_hash` via migration `002_recovery_auth.sql`,
+`POST /login/recovery`, and `newRecoveryAuthTokenB64` on `POST /vault/header`. The
+post-recovery flows now sign in with the recovery credential and push the rewrapped header
+plus the new password verifier atomically.
+
+Two things remain true and are surfaced in the UI rather than hidden:
+
+- An account only gets a recovery verifier when the recovery key is **created or rotated
+  while sync is on**. Accounts predating this have none until the user rotates once. The
+  Sync settings pane says so explicitly.
+- A vault restored from a backup using a *password* still has no recovery credential to
+  offer, and says so.
+
+The original write-up follows, for why the shape is what it is.
+
+## What was implemented first
+
+Nothing that closed it — only that it was no longer silent. `PostRecoveryFlow` (web) and
 `RecoverScreen` / `RestoreVaultView` (mobile) call `markSyncStaleAfterRecovery()`, which
 records the condition in the sync config's `lastError` and shows a warning telling the user
 the server was not updated and the account must be reset there.

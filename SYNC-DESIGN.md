@@ -113,9 +113,40 @@ Consequences to handle explicitly:
   transaction, push the rewrapped header *and* the new auth hash, or the account is locked
   out. Item ciphertexts are untouched (VK is unchanged) — this is why the existing key
   hierarchy makes password change cheap.
-- **Recovery-key unlock does not yield a KEK**, so it cannot produce an authToken. A device
-  recovering via recovery key must set a new master password before it can sync. That is
-  already the forced flow in the web and mobile shells.
+- **Recovery-key unlock does not yield a KEK**, so it cannot produce the password authToken.
+  Setting a new master password afterwards does not rescue it either: pushing the rotated
+  header requires authenticating with the OLD token, which a recovering device never had. So
+  the account carries a **second, recovery-derived verifier**, built the same one-way way:
+
+  ```
+  recovery key (128 random bits, the printed kit)
+    ──BLAKE2b, context "server-auth-recovery"──> recoveryAuthToken
+  server stores Argon2id(recoveryAuthToken, server_salt)
+  ```
+
+  This is a sibling of the existing `deriveSubkey(recBytes, "recovery-wrap")`, domain-separated
+  from it, so the verifier cannot unwrap the VK/BK envelopes and a server compromise still
+  yields nothing that decrypts a vault. The recovery key is 128 bits of true randomness, so
+  unlike a master password it is not meaningfully guessable offline; the server-side Argon2id
+  is kept anyway for uniformity with the password verifier.
+
+  Consequences:
+
+  - `POST /login/recovery` authenticates with `recoveryAuthTokenB64`. It is unauthenticated
+    and does Argon2 work, so it carries the same rate limit and concurrency cap as `/login`.
+  - **The recovery key bytes exist only at creation time.** They cannot be recovered from the
+    header — the envelope is encrypted *to* the wrapping key, and the subkey derivation is
+    one-way. So the verifier can only be registered when a recovery key is created or
+    rotated. An account that predates this, or whose recovery key was created before sync was
+    switched on, has **no** recovery verifier until the user rotates the key once. The Sync
+    settings screen states this plainly rather than letting the user discover it during an
+    actual recovery.
+  - **Rotating the recovery key must push the new verifier and the new header atomically**,
+    exactly as a password change does. The rotation changes the recovery envelopes in the
+    header anyway, so the two travel together in the same `POST /vault/header`.
+  - After recovering, the device authenticates with the recovery credential and pushes the
+    rewrapped header plus the new password verifier — the same compare-and-set path a normal
+    password change uses. It is not a special case beyond how it signs in.
 - Session tokens are short-lived bearer tokens (30 min) plus a rotating refresh token bound to
   the device record. Revoking a device deletes its refresh token server-side.
 

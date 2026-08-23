@@ -31,12 +31,20 @@ export class PgSyncRepository implements SyncRepository {
     kdfSalt: string;
     kdf: KdfParams;
     authHash: string;
+    recoveryAuthHash?: string | null;
     header: VaultHeader;
   }): Promise<void> {
     await this.pool.query(
-      `INSERT INTO accounts (id, label, kdf_salt, auth_hash, header, header_rev, rev)
-       VALUES ($1, $2, $3, $4, $5, 0, 0)`,
-      [input.id, input.label, Buffer.from(input.kdfSalt, "base64"), input.authHash, input.header],
+      `INSERT INTO accounts (id, label, kdf_salt, auth_hash, recovery_auth_hash, header, header_rev, rev)
+       VALUES ($1, $2, $3, $4, $5, $6, 0, 0)`,
+      [
+        input.id,
+        input.label,
+        Buffer.from(input.kdfSalt, "base64"),
+        input.authHash,
+        input.recoveryAuthHash ?? null,
+        input.header,
+      ],
     );
   }
 
@@ -48,7 +56,7 @@ export class PgSyncRepository implements SyncRepository {
   async getAccount(accountId: string): Promise<AccountRow | undefined> {
     if (!UUID_RE.test(accountId)) return undefined;
     const res = await this.pool.query(
-      `SELECT id, label, kdf_salt, auth_hash, header, header_rev, rev, created_at
+      `SELECT id, label, kdf_salt, auth_hash, recovery_auth_hash, header, header_rev, rev, created_at
        FROM accounts WHERE id = $1`,
       [accountId],
     );
@@ -61,6 +69,7 @@ export class PgSyncRepository implements SyncRepository {
       kdfSalt: (row.kdf_salt as Buffer).toString("base64"),
       kdf: header.kdf,
       authHash: row.auth_hash,
+      recoveryAuthHash: row.recovery_auth_hash ?? null,
       header,
       headerRev: Number(row.header_rev),
       rev: Number(row.rev),
@@ -217,6 +226,7 @@ export class PgSyncRepository implements SyncRepository {
     baseHeaderRev: number,
     header: VaultHeader,
     newAuthHash?: string,
+    newRecoveryAuthHash?: string,
   ): Promise<{ headerRev: number }> {
     const client = await this.pool.connect();
     try {
@@ -233,19 +243,20 @@ export class PgSyncRepository implements SyncRepository {
         throw new HeaderConflictError(currentHeaderRev);
       }
       const nextHeaderRev = currentHeaderRev + 1;
-      // Header write and auth-hash rotation happen in the same statement/transaction so a
-      // master-password change can never leave the account locked out.
+      // Header write and verifier rotation happen in the same statement/transaction, so a
+      // master-password change or recovery-key rotation can never leave the account with a
+      // credential that no longer matches the envelopes in the header it guards.
+      const sets = ["header = $2", "header_rev = $3"];
+      const params: unknown[] = [accountId, header, nextHeaderRev];
       if (newAuthHash !== undefined) {
-        await client.query(
-          `UPDATE accounts SET header = $2, header_rev = $3, auth_hash = $4 WHERE id = $1`,
-          [accountId, header, nextHeaderRev, newAuthHash],
-        );
-      } else {
-        await client.query(
-          `UPDATE accounts SET header = $2, header_rev = $3 WHERE id = $1`,
-          [accountId, header, nextHeaderRev],
-        );
+        params.push(newAuthHash);
+        sets.push(`auth_hash = $${params.length}`);
       }
+      if (newRecoveryAuthHash !== undefined) {
+        params.push(newRecoveryAuthHash);
+        sets.push(`recovery_auth_hash = $${params.length}`);
+      }
+      await client.query(`UPDATE accounts SET ${sets.join(", ")} WHERE id = $1`, params);
       await client.query("COMMIT");
       return { headerRev: nextHeaderRev };
     } catch (err) {

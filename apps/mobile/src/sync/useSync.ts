@@ -8,6 +8,7 @@ import {
   SyncAuthError,
   SyncClient,
   deriveAuthToken,
+  deriveRecoveryAuthToken,
   type SyncOutcome,
 } from "@pw/sync";
 import type { SyncIdentity } from "./config";
@@ -144,7 +145,7 @@ export function useSync(
           highestSeenRev: identity.sync.highestSeenRev,
           lastHeaderRev: identity.sync.lastHeaderRev,
         },
-        newToken,
+        { newAuthTokenB64: newToken },
       );
       updateSyncConfig({ lastHeaderRev: res.state.lastHeaderRev ?? 0, lastError: null });
       onAuthToken(newToken);
@@ -153,5 +154,39 @@ export function useSync(
     [store, identity, updateSyncConfig, authTokenB64, client, onAuthToken],
   );
 
-  return { status, syncNow, pushHeaderNow };
+  /**
+   * Register the server-side recovery verifier after the recovery key is created or rotated
+   * (SYNC-DESIGN.md §4). The rotation already changed the recovery envelopes in the header,
+   * so both travel in one compare-and-set push.
+   *
+   * This is the ONLY moment the recovery key's bytes exist — they cannot be recovered from
+   * the header later. Skip it and recovery sign-in stays unavailable for this account, which
+   * is exactly the lockout this mechanism exists to prevent.
+   */
+  const pushRecoveryVerifier = useCallback(
+    async (recoveryKeyText: string): Promise<void | null> => {
+      const { enabled, serverUrl, accountId } = identity.sync;
+      if (!enabled || !serverUrl || !accountId || !store) return null;
+
+      const c = client();
+      if (!c.isSignedIn()) {
+        if (!authTokenB64) throw new SyncAuthError("Not signed in to the sync server.");
+        await c.login(accountId, authTokenB64);
+      }
+      const res = await c.pushHeader(
+        store,
+        {
+          lastSyncRev: identity.sync.lastSyncRev,
+          highestSeenRev: identity.sync.highestSeenRev,
+          lastHeaderRev: identity.sync.lastHeaderRev,
+        },
+        { newRecoveryAuthTokenB64: deriveRecoveryAuthToken(recoveryKeyText) },
+      );
+      updateSyncConfig({ lastHeaderRev: res.state.lastHeaderRev ?? 0, lastError: null });
+      return;
+    },
+    [store, identity, updateSyncConfig, authTokenB64, client],
+  );
+
+  return { status, syncNow, pushHeaderNow, pushRecoveryVerifier };
 }

@@ -35,7 +35,22 @@ export interface RegisterRequest {
   kdf: VaultHeader["kdf"];
   /** deriveSubkey(KEK, "server-auth"), base64. The server stores only a slow hash of it. */
   authTokenB64: string;
+  /**
+   * deriveSubkey(recoveryKeyBytes, "server-auth-recovery"), base64. Optional: the recovery
+   * key's bytes exist only at creation time, so a device registering with a vault whose
+   * recovery key was made earlier simply has nothing to send. Absent means recovery sign-in
+   * is unavailable until the key is rotated (SYNC-DESIGN.md §4).
+   */
+  recoveryAuthTokenB64?: string;
   header: VaultHeader;
+  deviceId: string;
+  deviceLabel: string;
+}
+
+/** POST /login/recovery — sign in with the recovery credential instead of the password one. */
+export interface RecoveryLoginRequest {
+  accountId: string;
+  recoveryAuthTokenB64: string;
   deviceId: string;
   deviceLabel: string;
 }
@@ -67,6 +82,13 @@ export interface SessionResponse {
  */
 export interface ChangesResponse {
   rev: Rev;
+  /**
+   * Whether this account has a recovery-derived verifier registered (SYNC-DESIGN.md §4). It
+   * can only be registered when the recovery key is created or rotated, so accounts that
+   * predate the feature have none — and the user should learn that here, not during an
+   * actual recovery. Authenticated response only; never exposed to unauthenticated callers.
+   */
+  hasRecoveryAuth?: boolean;
   /** Present only when `headerRev > sinceHeader`. */
   header?: VaultHeader;
   headerRev: Rev;
@@ -99,6 +121,12 @@ export interface HeaderPushRequest {
   /** Present when the master password changed, so the auth credential rotates atomically. */
   newAuthTokenB64?: string;
   newKdf?: VaultHeader["kdf"];
+  /**
+   * Present when the recovery key was created or rotated. Travels with the header that
+   * carries the matching recovery envelopes, so the credential and the envelopes it unwraps
+   * can never fall out of step.
+   */
+  newRecoveryAuthTokenB64?: string;
 }
 
 export interface ErrorResponse {

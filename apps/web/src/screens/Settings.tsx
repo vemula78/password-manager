@@ -31,6 +31,23 @@ export function Settings() {
       const key = await store.createRecoveryKey(reauth);
       store.log("recovery_key_viewed");
       await store.persist();
+
+      // Register the new recovery verifier with the sync server, together with the header
+      // that now carries the matching recovery envelopes. This is the only moment the key's
+      // bytes exist — they cannot be recovered from the header afterwards — so a failure
+      // here means recovery sign-in stays unavailable and must be said out loud.
+      try {
+        await app.pushSyncRecoveryVerifier(key);
+      } catch (e) {
+        app.toast(
+          "Your recovery key was rotated on this device, but the sync server could not be " +
+            "updated: " +
+            (e instanceof Error ? e.message : String(e)) +
+            " Until you retry, this key will not let you recover access to sync.",
+          "error",
+        );
+      }
+
       setKit(kitFromStore(store, key));
       app.refresh();
     } finally {

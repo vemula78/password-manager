@@ -8,6 +8,7 @@ import {
   type ChangesResponse,
   type KdfInfoResponse,
   type LoginRequest,
+  type RecoveryLoginRequest,
   type RegisterRequest,
   type PushRequest,
   type PushResponse,
@@ -43,6 +44,12 @@ export interface SyncOutcome {
   conflicts: { id: string; conflictCopyId: string; title: string }[];
   /** Non-fatal things the UI must surface (rollback warnings, header changes). */
   warnings: string[];
+  /**
+   * Whether the account has a recovery-derived verifier registered. False means a recovery
+   * key will NOT get this vault back into the sync server (SYNC-DESIGN.md §4) — the UI has
+   * to say so, because the alternative is finding out during an actual recovery.
+   */
+  hasRecoveryAuth: boolean;
 }
 
 export interface SyncClientDeps {
@@ -110,6 +117,38 @@ export class SyncClient {
       accessToken: s.accessToken,
       expiresAt: Date.now() + s.expiresIn * 1000,
       authTokenB64,
+      credential: "password",
+    };
+  }
+
+  /**
+   * Sign in with the recovery-derived verifier instead of the password one.
+   *
+   * The only way a device that unlocked via recovery key can reach the server: it has no KEK,
+   * so no password token exists for it. Use it to push the rewrapped header and the new
+   * password verifier after the user sets a new master password.
+   *
+   * Throws SyncAuthError if the account never registered a recovery verifier — indistinguishable
+   * from a wrong key by design, so the message covers both.
+   */
+  async loginWithRecovery(accountId: string, recoveryAuthTokenB64: string): Promise<void> {
+    const body: RecoveryLoginRequest = {
+      accountId,
+      recoveryAuthTokenB64,
+      deviceId: this.deps.deviceId,
+      deviceLabel: this.deps.deviceLabel,
+    };
+    const s = await this.json<SessionResponse>(
+      "/login/recovery",
+      { method: "POST", body: JSON.stringify(body) },
+      false,
+    );
+    this.session = {
+      accountId: s.accountId,
+      accessToken: s.accessToken,
+      expiresAt: Date.now() + s.expiresIn * 1000,
+      authTokenB64: recoveryAuthTokenB64,
+      credential: "recovery",
     };
   }
 
@@ -122,11 +161,18 @@ export class SyncClient {
     label: string,
     authTokenB64: string,
     store: VaultStore,
+    /**
+     * Only available when this client just created the recovery key — its bytes cannot be
+     * recovered from the header afterwards. Omitting it leaves recovery sign-in unavailable
+     * until the key is rotated (SYNC-DESIGN.md §4).
+     */
+    recoveryAuthTokenB64?: string,
   ): Promise<string> {
     const body: RegisterRequest = {
       label,
       kdf: store.getHeader().kdf,
       authTokenB64,
+      ...(recoveryAuthTokenB64 !== undefined ? { recoveryAuthTokenB64 } : {}),
       header: store.getHeader(),
       deviceId: this.deps.deviceId,
       deviceLabel: this.deps.deviceLabel,
@@ -141,6 +187,7 @@ export class SyncClient {
       accessToken: s.accessToken,
       expiresAt: Date.now() + s.expiresIn * 1000,
       authTokenB64,
+      credential: "password",
     };
     return s.accountId;
   }
@@ -163,16 +210,28 @@ export class SyncClient {
     if (!this.session) throw new SyncAuthError("Not signed in to the sync server.");
     if (!isExpired(this.session, Date.now())) return;
     // Renew with the in-memory auth token — no password prompt, no persisted refresh token.
+    // Back to whichever endpoint accepts this credential: a recovery token replayed against
+    // /login just 401s, ending the only session a recovering device can get.
+    const recovery = this.session.credential === "recovery";
     const s = await this.json<SessionResponse>(
-      "/login",
+      recovery ? "/login/recovery" : "/login",
       {
         method: "POST",
-        body: JSON.stringify({
-          accountId: this.session.accountId,
-          authTokenB64: this.session.authTokenB64,
-          deviceId: this.deps.deviceId,
-          deviceLabel: this.deps.deviceLabel,
-        } satisfies LoginRequest),
+        body: JSON.stringify(
+          recovery
+            ? ({
+                accountId: this.session.accountId,
+                recoveryAuthTokenB64: this.session.authTokenB64,
+                deviceId: this.deps.deviceId,
+                deviceLabel: this.deps.deviceLabel,
+              } satisfies RecoveryLoginRequest)
+            : ({
+                accountId: this.session.accountId,
+                authTokenB64: this.session.authTokenB64,
+                deviceId: this.deps.deviceId,
+                deviceLabel: this.deps.deviceLabel,
+              } satisfies LoginRequest),
+        ),
       },
       false,
     );
@@ -228,9 +287,15 @@ export class SyncClient {
   async pushHeader(
     store: VaultStore,
     state: SyncState,
-    newAuthTokenB64?: string,
+    rotate: {
+      /** Set when the master password changed. */
+      newAuthTokenB64?: string;
+      /** Set when the recovery key was created or rotated. */
+      newRecoveryAuthTokenB64?: string;
+    } = {},
   ): Promise<{ state: SyncState; headerRev: Rev }> {
     await this.ensureSession();
+    const { newAuthTokenB64, newRecoveryAuthTokenB64 } = rotate;
     const header = store.getHeader();
     const body: HeaderPushRequest = {
       baseHeaderRev: state.lastHeaderRev ?? 0,
@@ -238,6 +303,7 @@ export class SyncClient {
       ...(newAuthTokenB64 !== undefined
         ? { newAuthTokenB64, newKdf: header.kdf }
         : {}),
+      ...(newRecoveryAuthTokenB64 !== undefined ? { newRecoveryAuthTokenB64 } : {}),
     };
     let res: PushResponse;
     try {
@@ -253,9 +319,13 @@ export class SyncClient {
       throw e;
     }
     // Keep the in-memory session usable: the credential the server now expects is the new
-    // one, so a later token renewal must present it.
-    if (newAuthTokenB64 !== undefined && this.session) {
-      this.session = { ...this.session, authTokenB64: newAuthTokenB64 };
+    // one, so a later token renewal must present it. Update whichever of the two this
+    // session actually authenticates with — a recovery session that rotated its own key
+    // would otherwise renew with a verifier the server has just replaced.
+    if (this.session) {
+      const rotated =
+        this.session.credential === "recovery" ? newRecoveryAuthTokenB64 : newAuthTokenB64;
+      if (rotated !== undefined) this.session = { ...this.session, authTokenB64: rotated };
     }
     return { state: { ...state, lastHeaderRev: res.rev }, headerRev: res.rev };
   }
@@ -412,7 +482,14 @@ export class SyncClient {
       // claim agreement with a server that never received its changes, and the next merge
       // would treat its own unpushed edits as "unchanged since last sync" and lose them.
       base: nextSyncBase(store.listItems({ includeArchived: true })),
-      outcome: { rev, pulled: remote.length, pushed, conflicts: merged.conflicts, warnings },
+      outcome: {
+        rev,
+        pulled: remote.length,
+        pushed,
+        conflicts: merged.conflicts,
+        warnings,
+        hasRecoveryAuth: changes.hasRecoveryAuth ?? false,
+      },
     };
   }
 }

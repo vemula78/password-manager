@@ -10,6 +10,12 @@ export interface AccountRow {
   kdfSalt: string; // base64
   kdf: KdfParams;
   authHash: string; // argon2id PHC string
+  /**
+   * Argon2id hash of the recovery-derived verifier (SYNC-DESIGN.md §4), or null for accounts
+   * that never registered one — the recovery key's bytes exist only at creation time, so an
+   * account gets this only once the key is created or rotated while sync is on.
+   */
+  recoveryAuthHash: string | null;
   header: VaultHeader;
   headerRev: number;
   rev: number;
@@ -69,6 +75,7 @@ export interface SyncRepository {
     kdfSalt: string;
     kdf: KdfParams;
     authHash: string;
+    recoveryAuthHash?: string | null;
     header: VaultHeader;
   }): Promise<void>;
 
@@ -106,14 +113,16 @@ export interface SyncRepository {
   pushChanges(accountId: string, baseRev: number, input: PushInput): Promise<PushResult>;
 
   /**
-   * Strict compare-and-set on headerRev. When newAuthHash is provided, the auth hash is
-   * rotated in the SAME transaction as the header write — a master-password change must
-   * never write one without the other.
+   * Strict compare-and-set on headerRev. When newAuthHash or newRecoveryAuthHash is
+   * provided, that verifier is rotated in the SAME transaction as the header write — a
+   * master-password change or recovery-key rotation must never write one without the other,
+   * or the credential and the envelopes it unwraps fall out of step.
    */
   pushHeader(
     accountId: string,
     baseHeaderRev: number,
     header: VaultHeader,
     newAuthHash?: string,
+    newRecoveryAuthHash?: string,
   ): Promise<{ headerRev: number }>;
 }

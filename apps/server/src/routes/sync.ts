@@ -53,8 +53,10 @@ export function registerSyncRoutes(app: FastifyInstance, deps: SyncRouteDeps): v
       const changes = await repo.getChangesSince(authed.accountId, since, sinceHeader);
       // deletions are opaque sealed tombstones ({id, ct}) — never inspected here, only
       // stored and returned. deletedAt/deviceId live only inside `ct`, under the vault key.
+      const account = await repo.getAccount(authed.accountId);
       const body: ChangesResponse = {
         rev: changes.rev,
+        hasRecoveryAuth: !!account?.recoveryAuthHash,
         header: changes.header,
         headerRev: changes.headerRev,
         items: changes.items.map((i) => ({ id: i.itemId, ct: i.ct, rev: i.rev })),
@@ -92,7 +94,7 @@ export function registerSyncRoutes(app: FastifyInstance, deps: SyncRouteDeps): v
     const authed = requireAuth(config, req, reply);
     if (!authed) return;
 
-    const { baseHeaderRev, header, newAuthTokenB64 } = req.body ?? {};
+    const { baseHeaderRev, header, newAuthTokenB64, newRecoveryAuthTokenB64 } = req.body ?? {};
     if (baseHeaderRev === undefined || !header) {
       return reply.code(400).send({ error: "malformed header push request" } satisfies ErrorResponse);
     }
@@ -102,7 +104,20 @@ export function registerSyncRoutes(app: FastifyInstance, deps: SyncRouteDeps): v
       // repo.pushHeader. Getting this decoupled is the sharpest edge in this server: a
       // header write without the matching hash rotation locks the account out.
       const newAuthHash = newAuthTokenB64 !== undefined ? await hashAuthToken(newAuthTokenB64) : undefined;
-      const result = await repo.pushHeader(authed.accountId, baseHeaderRev, header, newAuthHash);
+      // Same reasoning for the recovery verifier: it guards the recovery envelopes carried by
+      // this very header, so writing one without the other leaves the printed recovery kit
+      // and the server's idea of it out of step.
+      const newRecoveryAuthHash =
+        newRecoveryAuthTokenB64 !== undefined
+          ? await hashAuthToken(newRecoveryAuthTokenB64)
+          : undefined;
+      const result = await repo.pushHeader(
+        authed.accountId,
+        baseHeaderRev,
+        header,
+        newAuthHash,
+        newRecoveryAuthHash,
+      );
       req.log.info(
         { accountId: authed.accountId, headerRev: result.headerRev },
         "vault header pushed",

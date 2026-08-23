@@ -101,6 +101,12 @@ recovery-key unlock counts as already reauthenticated, since it is the stronger 
   was a real bug.
 - Server auth is `deriveSubkey(KEK, "server-auth")` — one-way, so the server holds nothing
   that can decrypt a vault. Derived at unlock, held in memory, never persisted.
+- **There is a second verifier**, `deriveSubkey(recoveryKeyBytes, "server-auth-recovery")`,
+  because a recovery-key unlock yields no KEK and such a device would otherwise be locked
+  out of the server forever. It can only be registered when the recovery key is created or
+  rotated — the bytes do not exist at any other time — so accounts predating it have none,
+  and the UI says so. A missing verifier must answer like a wrong one, never like an open
+  door. See NOTES/post-recovery-sync-gap.md.
 - A master-password change must push the rotated header **and** the new auth verifier
   atomically, or the old password keeps working against the server.
 - Audit log and settings are deliberately **device-local**, not synced.

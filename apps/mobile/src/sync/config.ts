@@ -92,29 +92,3 @@ export function loadSyncConfig(): SyncIdentity {
 export function saveSyncConfig(cfg: SyncIdentity): void {
   writeRaw(cfg);
 }
-
-export const POST_RECOVERY_SYNC_MESSAGE =
-  "Sync was not updated. Because you unlocked with a recovery key, this device cannot prove " +
-  "itself to the sync server, so the server still holds your old master password and other " +
-  "devices will not see the change. Reset the account on the sync server, then connect this " +
-  "device again.";
-
-/**
- * Sync cannot follow a recovery-key unlock. The server credential is
- * deriveSubkey(KEK, "server-auth") and the KEK comes only from the master password
- * (SYNC-DESIGN.md §4), so a device unlocked by recovery key holds nothing the server will
- * accept — it cannot authenticate, and so cannot push the rotated header even after the user
- * sets a new master password. The server keeps the OLD header and the OLD password keeps
- * working against it.
- *
- * There is no in-app fix today; closing it needs a recovery-derived verifier stored
- * server-side (see NOTES/post-recovery-sync-gap.md). What must NOT happen is silence —
- * record it and tell the user, so they know sync is stale rather than assuming their
- * password change took effect everywhere. Returns true when sync was actually configured.
- */
-export function markSyncStaleAfterRecovery(): boolean {
-  const cfg = loadSyncConfig();
-  if (!cfg.sync.enabled || !cfg.sync.accountId) return false;
-  saveSyncConfig({ ...cfg, sync: { ...cfg.sync, lastError: POST_RECOVERY_SYNC_MESSAGE } });
-  return true;
-}

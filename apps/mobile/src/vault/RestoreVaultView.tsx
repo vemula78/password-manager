@@ -22,7 +22,7 @@ import { loadSyncConfig } from "../sync/config";
 import { Button, Chip, Field, StrengthBar, WarningBanner } from "../components/ui";
 import { RecoveryKeyCard } from "../components/RecoveryKeyCard";
 import { colors, spacing } from "../theme";
-import { POST_RECOVERY_SYNC_MESSAGE, markSyncStaleAfterRecovery } from "../sync/config";
+import { pushRecoveredHeader } from "../sync/postRecovery";
 
 export function RestoreVaultView({ onDone, onCancel }: { onDone: () => void; onCancel: () => void }) {
   usePreventScreenCapture("restore-vault");
@@ -33,7 +33,13 @@ export function RestoreVaultView({ onDone, onCancel }: { onDone: () => void; onC
   const [credential, setCredential] = useState("");
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
-  const [syncStale, setSyncStale] = useState(false);
+  const [syncProblem, setSyncProblem] = useState<string | null>(null);
+  /**
+   * The recovery key this restore used, kept because `credential` is cleared as soon as the
+   * vault opens. It is the only credential the sync server will accept from a device that
+   * has not yet had a master password set (SYNC-DESIGN.md §4).
+   */
+  const [usedRecoveryKey, setUsedRecoveryKey] = useState("");
 
   // Present only when the backup was opened via recovery key and is awaiting a forced
   // master-password reset before it can be adopted.
@@ -79,6 +85,7 @@ export function RestoreVaultView({ onDone, onCancel }: { onDone: () => void; onC
       if (credKind === "recoveryKey") {
         // Opened via recovery key only — mirror RecoverScreen: force a new master
         // password before this store is ever adopted/unlocked in the app.
+        setUsedRecoveryKey(credential);
         setPendingStore(store);
         setStep("newPassword");
       } else {
@@ -106,12 +113,12 @@ export function RestoreVaultView({ onDone, onCancel }: { onDone: () => void; onC
     setBusy(true);
     try {
       await pendingStore.changeMasterPassword(newPassword);
-      setSyncStale(markSyncStaleAfterRecovery());
       // Any biometric-cached master password is now stale — remove it.
       await clearStoredMasterPassword();
       setPrefs({ biometricEnabled: null }); // re-offer on next password unlock
       const rotated = await pendingStore.createRecoveryKey(); // the recovery key used to
       // restore this backup would otherwise still open it
+      setSyncProblem(await pushRecoveredHeader(pendingStore, usedRecoveryKey, newPassword, rotated));
       setNewRecoveryKey(rotated);
       setNewPassword("");
       setConfirm("");
@@ -127,7 +134,7 @@ export function RestoreVaultView({ onDone, onCancel }: { onDone: () => void; onC
     return (
       <ScrollView style={styles.screen} contentContainerStyle={styles.content}>
         <WarningBanner text="Your master password was changed and a NEW recovery key was generated. The old recovery key no longer works." />
-        {syncStale && <WarningBanner text={POST_RECOVERY_SYNC_MESSAGE} />}
+        {syncProblem && <WarningBanner text={syncProblem} />}
         <RecoveryKeyCard
           recoveryKey={newRecoveryKey}
           clipboardClearSeconds={pendingStore.settings.clipboardClearSeconds}

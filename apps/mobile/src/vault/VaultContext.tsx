@@ -100,6 +100,11 @@ interface VaultContextValue {
    * succeeds.
    */
   pushSyncHeader: (newMasterPassword: string) => Promise<void | null>;
+  /**
+   * Register the server-side recovery verifier after creating or rotating the recovery key.
+   * Resolves to null when sync is off; throws when the server could not be updated.
+   */
+  pushSyncRecoveryVerifier: (recoveryKeyText: string) => Promise<void | null>;
 }
 
 const Ctx = createContext<VaultContextValue | null>(null);
@@ -369,7 +374,7 @@ export function VaultProvider({ children }: { children: React.ReactNode }) {
     setPwInput("");
   }, [pwPrompt]);
 
-  const { status: syncStatus, syncNow, pushHeaderNow } = useSync(
+  const { status: syncStatus, syncNow, pushHeaderNow, pushRecoveryVerifier } = useSync(
     store,
     syncIdentity,
     updateSyncConfig,
@@ -429,11 +434,12 @@ export function VaultProvider({ children }: { children: React.ReactNode }) {
       syncStatus,
       syncNow,
       pushSyncHeader: pushHeaderNow,
+      pushSyncRecoveryVerifier: pushRecoveryVerifier,
     }),
     [status, errorMessage, store, tick, refresh, prefs, setPrefs, createVault, unlockWithPassword,
      unlockWithRecoveryKey, unlockWithBiometrics, lock, adoptStore, enableBiometrics,
      disableBiometrics, reauth, reauthPassword, syncIdentity, updateSyncConfig, authTokenB64,
-     syncStatus, syncNow, pushHeaderNow],
+     syncStatus, syncNow, pushHeaderNow, pushRecoveryVerifier],
   );
 
   return (

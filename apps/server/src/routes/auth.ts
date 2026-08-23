@@ -4,6 +4,7 @@ import type { FastifyInstance } from "fastify";
 import type {
   KdfInfoResponse,
   LoginRequest,
+  RecoveryLoginRequest,
   RegisterRequest,
   SessionResponse,
 } from "@pw/sync";
@@ -50,18 +51,25 @@ export function registerAuthRoutes(app: FastifyInstance, deps: AuthRouteDeps): v
       return reply.code(403).send({ error: "registration is closed" });
     }
 
-    const { label, kdf, authTokenB64, header, deviceId, deviceLabel } = req.body ?? {};
+    const { label, kdf, authTokenB64, recoveryAuthTokenB64, header, deviceId, deviceLabel } =
+      req.body ?? {};
     if (!label || !kdf || !authTokenB64 || !header || !deviceId || !deviceLabel) {
       return reply.code(400).send({ error: "missing required fields" });
     }
     const accountId = randomUUID();
     const authHash = await hashAuthToken(authTokenB64);
+    // Optional: only a client that just created the recovery key holds its bytes. Absent
+    // means recovery sign-in stays unavailable until the key is rotated.
+    const recoveryAuthHash = recoveryAuthTokenB64
+      ? await hashAuthToken(recoveryAuthTokenB64)
+      : null;
     await repo.createAccount({
       id: accountId,
       label,
       kdfSalt: kdf.saltB64,
       kdf,
       authHash,
+      recoveryAuthHash,
       header,
     });
     await repo.upsertDevice(accountId, deviceId, deviceLabel);
@@ -86,6 +94,39 @@ export function registerAuthRoutes(app: FastifyInstance, deps: AuthRouteDeps): v
       return reply.code(401).send({ error: "invalid credentials" });
     }
     const ok = await verifyAuthToken(account.authHash, authTokenB64);
+    if (!ok) {
+      return reply.code(401).send({ error: "invalid credentials" });
+    }
+    await repo.upsertDevice(accountId, deviceId, deviceLabel);
+    const session = await issueSession(repo, config, accountId, deviceId);
+    return reply.send(session);
+  });
+
+  /**
+   * Sign in with the recovery-derived verifier (SYNC-DESIGN.md §4). This exists so a device
+   * that unlocked with a recovery key — and therefore has no KEK and no password token — can
+   * still push its rewrapped header. Without it such a device is locked out of the server
+   * permanently, and the old master password keeps working against it forever.
+   *
+   * Rate-limited together with /login (shared prefix bucket in index.ts).
+   */
+  app.post<{ Body: RecoveryLoginRequest }>("/login/recovery", async (req, reply) => {
+    const { accountId, recoveryAuthTokenB64, deviceId, deviceLabel } = req.body ?? {};
+    if (!accountId || !recoveryAuthTokenB64 || !deviceId || !deviceLabel) {
+      return reply.code(400).send({ error: "missing required fields" });
+    }
+    const account = await repo.getAccount(accountId);
+    // A null recoveryAuthHash means this account never registered a recovery verifier. It
+    // must behave exactly like a wrong credential — same dummy verify, same 401, same timing
+    // — so it cannot be probed, and must NEVER be read as "no verifier set, so allow in".
+    if (!account || !account.recoveryAuthHash) {
+      await verifyAuthToken(
+        "$argon2id$v=19$m=19456,t=2,p=1$AAAAAAAAAAAAAAAAAAAAAA$AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        recoveryAuthTokenB64,
+      ).catch(() => false);
+      return reply.code(401).send({ error: "invalid credentials" });
+    }
+    const ok = await verifyAuthToken(account.recoveryAuthHash, recoveryAuthTokenB64);
     if (!ok) {
       return reply.code(401).send({ error: "invalid credentials" });
     }

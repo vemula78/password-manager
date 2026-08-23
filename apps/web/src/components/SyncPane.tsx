@@ -160,6 +160,14 @@ export function SyncPane() {
             </Warning>
           )}
           {sync.lastError && <Warning>{sync.lastError}</Warning>}
+          {app.syncStatus.lastOutcome && !app.syncStatus.lastOutcome.hasRecoveryAuth && (
+            <Warning>
+              Recovery sign-in is not set up for this account. If you forget your master
+              password, your recovery key will still open this vault, but it will not be able
+              to update the sync server — you would have to reset the account there. Rotate
+              your recovery key in Settings to enable it.
+            </Warning>
+          )}
           {app.syncStatus.lastOutcome && app.syncStatus.lastOutcome.conflicts.length > 0 && (
             <Warning>
               {app.syncStatus.lastOutcome.conflicts.length} item(s) were changed on two devices

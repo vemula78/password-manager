@@ -11,7 +11,13 @@ export function createPool(databaseUrl: string): pg.Pool {
   return new pg.Pool({ connectionString: databaseUrl });
 }
 
+// Applied in order on every boot. Each file must be idempotent (IF NOT EXISTS etc.) — there
+// is no migrations table; re-running them is the mechanism, not a hazard.
+const MIGRATIONS = ["001_init.sql", "002_recovery_auth.sql"];
+
 export async function runMigrations(pool: pg.Pool): Promise<void> {
-  const sql = readFileSync(join(__dirname, "..", "migrations", "001_init.sql"), "utf8");
-  await pool.query(sql);
+  for (const name of MIGRATIONS) {
+    const sql = readFileSync(join(__dirname, "..", "migrations", name), "utf8");
+    await pool.query(sql);
+  }
 }

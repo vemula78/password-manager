@@ -14,6 +14,12 @@ originating device. The server stores and returns `ct` verbatim and never parses
   Closed by default once one account exists — see `REGISTRATION_OPEN` below.
 - `POST /login` — authenticates with `authTokenB64`, returns a session. Rate-limited
   (10/min/IP).
+- `POST /login/recovery` — authenticates with `recoveryAuthTokenB64`, the verifier derived
+  from the printed recovery key (SYNC-DESIGN.md §4). This is the only way a device that
+  unlocked via recovery key can reach the server: it has no KEK and so no password token.
+  Shares the `/login` rate-limit bucket. An account with no recovery verifier registered
+  answers exactly like a wrong key — same 401, same dummy Argon2 verify — and is never
+  treated as "no verifier set, so allow in".
 - `POST /refresh` — rotates the refresh token, returns a new session. Rate-limited
   (20/min/IP).
 - `POST /devices/revoke` — **bearer-authenticated.** Deletes the caller's own device's
@@ -26,7 +32,9 @@ originating device. The server stores and returns `ct` verbatim and never parses
 - `POST /vault/changes` — bearer-authenticated push (optimistic concurrency on `baseRev`).
   `deletions` are sealed tombstones (`{ id, ct }`).
 - `POST /vault/header` — bearer-authenticated header compare-and-set (master password /
-  recovery rotation).
+  recovery rotation). `newAuthTokenB64` and `newRecoveryAuthTokenB64` each rotate their
+  verifier in the SAME transaction as the header write, so a credential can never fall out
+  of step with the envelopes it unwraps.
 
 Argon2id hashing (register/login) is additionally capped at 4 concurrent operations
 process-wide, so a burst of requests queues rather than exhausting memory.

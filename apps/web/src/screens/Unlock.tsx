@@ -205,7 +205,7 @@ export function Unlock(props: {
         )}
 
         {mode === "recovery" && recStage === "post" && recStore && (
-          <PostRecoveryFlow store={recStore} onDone={(s) => void finishUnlock(s)} />
+          <PostRecoveryFlow store={recStore} recoveryKey={recKey} onDone={(s) => void finishUnlock(s)} />
         )}
 
         {mode === "restore" && (

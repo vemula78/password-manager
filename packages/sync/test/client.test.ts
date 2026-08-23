@@ -423,7 +423,7 @@ describe("pushHeader", () => {
     const { state, headerRev } = await client.pushHeader(
       store,
       freshState({ lastHeaderRev: 3 }),
-      "new-auth-token",
+      { newAuthTokenB64: "new-auth-token" },
     );
 
     expect(server.headerPushes).toHaveLength(1);
@@ -450,7 +450,7 @@ describe("pushHeader", () => {
     server.headerServerRev = 7;
     const client = await signedInClient(server);
 
-    const err = await client.pushHeader(store, freshState(), "t").catch((e) => e);
+    const err = await client.pushHeader(store, freshState(), { newAuthTokenB64: "t" }).catch((e) => e);
     expect(err).toBeInstanceOf(SyncHeaderConflictError);
     expect(err.serverHeaderRev).toBe(7);
     expect(err.message).toMatch(/NOT updated/);
@@ -461,14 +461,14 @@ describe("pushHeader", () => {
     const server = fakeServer();
     server.headerStatus = 500;
     const client = await signedInClient(server);
-    await expect(client.pushHeader(store, freshState(), "t")).rejects.toThrow();
+    await expect(client.pushHeader(store, freshState(), { newAuthTokenB64: "t" })).rejects.toThrow();
   });
 
   it("keeps the in-memory session usable after the credential rotates", async () => {
     const store = await makeVault();
     const server = fakeServer();
     const client = await signedInClient(server);
-    await client.pushHeader(store, freshState(), "rotated-token");
+    await client.pushHeader(store, freshState(), { newAuthTokenB64: "rotated-token" });
     expect(client.isSignedIn()).toBe(true);
     // A later sync must still work with the rotated credential.
     server.script.rev = 1;

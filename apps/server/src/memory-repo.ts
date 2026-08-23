@@ -33,6 +33,7 @@ export class InMemorySyncRepository implements SyncRepository {
     kdfSalt: string;
     kdf: KdfParams;
     authHash: string;
+    recoveryAuthHash?: string | null;
     header: VaultHeader;
   }): Promise<void> {
     if (this.accounts.has(input.id)) throw new Error("account already exists");
@@ -42,6 +43,7 @@ export class InMemorySyncRepository implements SyncRepository {
       kdfSalt: input.kdfSalt,
       kdf: input.kdf,
       authHash: input.authHash,
+      recoveryAuthHash: input.recoveryAuthHash ?? null,
       header: input.header,
       headerRev: 0,
       rev: 0,
@@ -137,6 +139,7 @@ export class InMemorySyncRepository implements SyncRepository {
     baseHeaderRev: number,
     header: VaultHeader,
     newAuthHash?: string,
+    newRecoveryAuthHash?: string,
   ): Promise<{ headerRev: number }> {
     const a = this.accounts.get(accountId);
     if (!a) throw new Error("account not found");
@@ -148,6 +151,9 @@ export class InMemorySyncRepository implements SyncRepository {
     a.headerRev = a.headerRev + 1;
     if (newAuthHash !== undefined) {
       a.authHash = newAuthHash;
+    }
+    if (newRecoveryAuthHash !== undefined) {
+      a.recoveryAuthHash = newRecoveryAuthHash;
     }
     return { headerRev: a.headerRev };
   }

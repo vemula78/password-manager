@@ -134,7 +134,7 @@ export function RestorePanel(props: {
     blockedForMs <= 0;
 
   if (recStore) {
-    return <PostRecoveryFlow store={recStore} onDone={props.onRestored} />;
+    return <PostRecoveryFlow store={recStore} recoveryKey={secret} onDone={props.onRestored} />;
   }
 
   return (
