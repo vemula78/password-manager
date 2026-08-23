@@ -67,5 +67,12 @@ SPEC.md  PLAN.md
    save-current-site, generator, domain/HTTP/lookalike warnings, hard refusal to fill
    transaction passwords/MPIN/TPIN/UPI PIN/CVV (copy/reveal only, behind reauth). Background
    worker holds the unlocked store in memory; worker death = lock.
+6. **M6 — iOS AutoFill credential provider** (done 23-Aug-2026): app-extension target reading
+   the VK from a Face ID/passcode-gated shared Keychain item (App Group), so AutoFill decrypts
+   items without re-deriving the KEK. See NOTES/ios-autofill-setup.md.
+7. **M7 — V2 multi-device encrypted sync** (designed 23-Aug-2026, **not implemented**):
+   self-hosted Node + Postgres blob store holding ciphertext only; per-item sync with
+   conflict-preserving merge. Full design in SYNC-DESIGN.md — read it before writing code.
+   Note this is the first V2 item to be scheduled; the rest of V2 stays out of scope.
 
 Each milestone ends with a commit (author Praveen Vemula <vemula78@gmail.com>).
