@@ -2,7 +2,7 @@
 // an in-memory one (tests, no live Postgres needed) and a pg one (production).
 // The server never inspects the shape of `ct`/`header` — they are passed through as
 // opaque JSON values (the `unknown` type reflects that; routes must not narrow it).
-import type { Ciphertext, KdfParams, VaultHeader, Tombstone } from "@pw/core";
+import type { Ciphertext, KdfParams, SealedTombstone, VaultHeader } from "@pw/core";
 
 export interface AccountRow {
   id: string;
@@ -23,7 +23,9 @@ export interface ItemRow {
   rev: number;
 }
 
-export interface DeletionRow extends Tombstone {
+/** Opaque sealed tombstone as stored/served by the server — see SealedTombstone in @pw/core.
+ * The server never sees deletedAt or deviceId; both live only inside `ct`. */
+export interface DeletionRow extends SealedTombstone {
   rev: number;
 }
 
@@ -37,8 +39,7 @@ export interface DeviceRow {
 
 export interface PushInput {
   items: { id: string; ct: Ciphertext }[];
-  deletions: Tombstone[];
-  settings?: Ciphertext;
+  deletions: SealedTombstone[];
 }
 
 export interface PushResult {
@@ -73,22 +74,29 @@ export interface SyncRepository {
 
   getAccount(accountId: string): Promise<AccountRow | undefined>;
 
+  /** True once at least one account has ever been created — used to gate registration. */
+  hasAnyAccount(): Promise<boolean>;
+
   upsertDevice(accountId: string, deviceId: string, label: string): Promise<void>;
   getDevice(accountId: string, deviceId: string): Promise<DeviceRow | undefined>;
   setDeviceRefreshHash(accountId: string, deviceId: string, refreshHash: string | null): Promise<void>;
   deleteDevice(accountId: string, deviceId: string): Promise<void>;
 
-  /** Everything changed strictly after `since`. */
+  /**
+   * Everything changed strictly after `since` (items/deletions, all on the account's
+   * single item-domain revision counter), plus the header iff `headerRev > sinceHeader` — a
+   * SEPARATE counter, compared like-for-like. Do not compare headerRev against `since`.
+   */
   getChangesSince(
     accountId: string,
     since: number,
+    sinceHeader: number,
   ): Promise<{
     rev: number;
     headerRev: number;
     header?: VaultHeader;
     items: ItemRow[];
     deletions: DeletionRow[];
-    settings?: Ciphertext;
   }>;
 
   /**

@@ -12,7 +12,12 @@ const ORIGINS = (process.env.ALLOWED_ORIGINS ?? "http://localhost:5173")
 
 const app = await buildApp(
   new InMemorySyncRepository(),
-  { serverSecret: Buffer.from("dev-only-insecure-secret-not-for-real-use!!") },
+  {
+    serverSecret: Buffer.from("dev-only-insecure-secret-not-for-real-use!!"),
+    // Dev server is in-memory and disposable — registration-once-then-closed would just be
+    // an annoyance across restarts while testing multiple accounts locally.
+    registrationOpen: true,
+  },
   { allowedOrigins: ORIGINS },
 );
 await app.listen({ port: PORT, host: "127.0.0.1" });

@@ -70,9 +70,16 @@ SPEC.md  PLAN.md
 6. **M6 — iOS AutoFill credential provider** (done 23-Aug-2026): app-extension target reading
    the VK from a Face ID/passcode-gated shared Keychain item (App Group), so AutoFill decrypts
    items without re-deriving the KEK. See NOTES/ios-autofill-setup.md.
-7. **M7 — V2 multi-device encrypted sync** (designed 23-Aug-2026, **not implemented**):
-   self-hosted Node + Postgres blob store holding ciphertext only; per-item sync with
-   conflict-preserving merge. Full design in SYNC-DESIGN.md — read it before writing code.
-   Note this is the first V2 item to be scheduled; the rest of V2 stays out of scope.
+7. **M7 — V2 multi-device encrypted sync** (done 23-Aug-2026): self-hosted Fastify + Postgres
+   blob store holding ciphertext only (`apps/server`); per-item sync with a conflict-preserving
+   merge that never discards the losing edit (`packages/sync`); wired into web, mobile and the
+   extension. Server auth is a one-way subkey of the KEK; the master password never leaves the
+   device. Design in SYNC-DESIGN.md (kept current with the revisions made while building).
+   ✅ gate: an eight-case two-device end-to-end test with real vault crypto through the real
+   HTTP routes (`apps/server/test/two-device-e2e.test.ts`), plus a browser walk-through of the
+   real PWA against a live server. An independent Codex review followed; findings and their
+   dispositions are in NOTES/sync-review-outcomes.md — the critical one (a server could forge
+   deletions) is fixed by sealing tombstones. This is the first V2 item; the rest of V2
+   (family sharing, passkeys, breach monitoring, trusted-contact recovery) stays out of scope.
 
 Each milestone ends with a commit (author Praveen Vemula <vemula78@gmail.com>).

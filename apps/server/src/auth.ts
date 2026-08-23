@@ -10,25 +10,58 @@ const ACCESS_TOKEN_TTL_SECONDS = 30 * 60;
 export interface ServerConfig {
   /** HMAC key for access tokens and the dummy-KDF derivation. Never logged. */
   serverSecret: Buffer;
+  /**
+   * Personal single-user server: registration closes itself the moment one account exists,
+   * unless the operator explicitly sets REGISTRATION_OPEN=true. Defaults to closed (false)
+   * so an omitted value never accidentally leaves account creation open forever.
+   */
+  registrationOpen?: boolean;
+}
+
+// ---- Argon2 concurrency cap --------------------------------------------------------------
+// Argon2id is deliberately memory-hard (19.5 MB per hash here). A burst of concurrent
+// unauthenticated /register or /login calls each triggering a hash could exhaust the
+// process's memory well before any per-IP rate limit catches up. Cap how many run at once;
+// excess callers simply wait their turn instead of piling on more memory pressure.
+const MAX_CONCURRENT_ARGON2 = 4;
+let activeArgon2 = 0;
+const argon2Queue: (() => void)[] = [];
+
+async function withArgon2Slot<T>(fn: () => Promise<T>): Promise<T> {
+  if (activeArgon2 >= MAX_CONCURRENT_ARGON2) {
+    await new Promise<void>((resolve) => argon2Queue.push(resolve));
+  }
+  activeArgon2++;
+  try {
+    return await fn();
+  } finally {
+    activeArgon2--;
+    const next = argon2Queue.shift();
+    if (next) next();
+  }
 }
 
 // ---- authToken hashing (argon2id, salt embedded in the PHC-format output string) --------
 
 export async function hashAuthToken(authTokenB64: string): Promise<string> {
-  return argon2.hash(authTokenB64, {
-    algorithm: 2, // argon2id
-    memoryCost: 19456,
-    timeCost: 2,
-    parallelism: 1,
-  });
+  return withArgon2Slot(() =>
+    argon2.hash(authTokenB64, {
+      algorithm: 2, // argon2id
+      memoryCost: 19456,
+      timeCost: 2,
+      parallelism: 1,
+    }),
+  );
 }
 
 export async function verifyAuthToken(hash: string, authTokenB64: string): Promise<boolean> {
-  try {
-    return await argon2.verify(hash, authTokenB64);
-  } catch {
-    return false;
-  }
+  return withArgon2Slot(async () => {
+    try {
+      return await argon2.verify(hash, authTokenB64);
+    } catch {
+      return false;
+    }
+  });
 }
 
 // ---- bearer access tokens: HMAC-signed, stateless, short-lived --------------------------

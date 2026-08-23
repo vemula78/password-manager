@@ -1,7 +1,7 @@
 // Wire protocol between a client device and the self-hosted sync server.
 // See SYNC-DESIGN.md. The server treats every `ct` as opaque bytes: it performs no crypto
 // on vault content and cannot decrypt anything here.
-import type { Ciphertext, Tombstone, VaultHeader } from "@pw/core";
+import type { Ciphertext, SealedTombstone, VaultHeader } from "@pw/core";
 
 export const PROTOCOL_VERSION = 1;
 
@@ -57,22 +57,35 @@ export interface SessionResponse {
 
 // ---- sync -------------------------------------------------------------------
 
+/**
+ * `GET /vault/changes?since=<rev>&sinceHeader=<headerRev>`.
+ *
+ * `since` and `sinceHeader` are DIFFERENT counters (review §3): the account/item revision is
+ * bumped by item pushes, the header revision only by header pushes. Comparing one against the
+ * other means a header rotation is never delivered to a device that has pushed items since.
+ * The client therefore tracks both and submits both; the server compares like for like.
+ */
 export interface ChangesResponse {
   rev: Rev;
-  /** Present only when the header changed since `since`. */
+  /** Present only when `headerRev > sinceHeader`. */
   header?: VaultHeader;
   headerRev: Rev;
   items: ItemEnvelope[];
-  deletions: Tombstone[];
-  settings?: Ciphertext;
+  /**
+   * SEALED tombstones (review §1). A plaintext tombstone is a deletion instruction the
+   * client cannot authenticate, so a malicious server could forge one per item id and make
+   * every device destroy the credential. Only the id is in the clear; the deletion time and
+   * originating device are AEAD-encrypted under the Vault Key with `tombstone:{id}` bound in
+   * as associated data, so a forged or transplanted tombstone fails to open.
+   */
+  deletions: SealedTombstone[];
 }
 
 export interface PushRequest {
   /** The rev this push is based on. Server rejects with 409 if it has moved on. */
   baseRev: Rev;
   items: { id: string; ct: Ciphertext }[];
-  deletions: Tombstone[];
-  settings?: Ciphertext;
+  deletions: SealedTombstone[];
 }
 
 export interface PushResponse {
@@ -105,6 +118,44 @@ export class SyncAuthError extends Error {
   constructor(message = "Sync authentication failed.") {
     super(message);
     this.name = "SyncAuthError";
+  }
+}
+
+/**
+ * Something the server sent could not be authenticated or parsed. This ABORTS the whole sync
+ * cycle (review §6): the previous behaviour — warn, skip the bad item, commit everything else
+ * and advance `lastSyncRev` — meant a server could corrupt one newly-created item once and
+ * that credential would be permanently absent on this device, because a later pull from the
+ * advanced revision would never mention it again. Nothing is applied, no revision moves, and
+ * the next sync retries from exactly the same revision.
+ */
+export interface IntegrityFailure {
+  kind: "item" | "tombstone";
+  id: string;
+  reason: string;
+}
+
+export class SyncIntegrityError extends Error {
+  constructor(readonly failures: IntegrityFailure[]) {
+    super(
+      `The sync server returned ${failures.length} object(s) that failed their integrity check ` +
+        `(${failures.map((f) => `${f.kind} ${f.id.slice(0, 8)}\u2026`).join(", ")}). ` +
+        "This means corrupted or TAMPERED data \u2014 possibly a forged deletion. " +
+        "Nothing was applied and no local data was changed or removed.",
+    );
+    this.name = "SyncIntegrityError";
+  }
+}
+
+/** 409 on POST /vault/header: another device rotated the password first. Never merge headers. */
+export class SyncHeaderConflictError extends Error {
+  constructor(readonly serverHeaderRev: Rev) {
+    super(
+      `The sync server's vault header is at revision ${serverHeaderRev}; this device tried to ` +
+        "overwrite an older one. The master password may have been changed on another device. " +
+        "Sync, unlock with the current password, and retry \u2014 the server was NOT updated.",
+    );
+    this.name = "SyncHeaderConflictError";
   }
 }
 

@@ -1,7 +1,7 @@
 // In-memory SyncRepository implementation, used by tests (no live Postgres required) and
 // usable as a lightweight standalone mode. Mirrors the transactional semantics of the pg
 // implementation exactly, including the atomic header+auth-hash rotation.
-import type { Ciphertext, KdfParams, VaultHeader } from "@pw/core";
+import type { KdfParams, VaultHeader } from "@pw/core";
 import {
   AccountRow,
   DeletionRow,
@@ -17,7 +17,6 @@ import {
 interface InternalAccount extends AccountRow {
   items: Map<string, ItemRow>;
   deletions: Map<string, DeletionRow>;
-  settings?: { ct: Ciphertext; rev: number };
 }
 
 export class InMemorySyncRepository implements SyncRepository {
@@ -52,10 +51,14 @@ export class InMemorySyncRepository implements SyncRepository {
     });
   }
 
+  async hasAnyAccount(): Promise<boolean> {
+    return this.accounts.size > 0;
+  }
+
   async getAccount(accountId: string): Promise<AccountRow | undefined> {
     const a = this.accounts.get(accountId);
     if (!a) return undefined;
-    const { items: _items, deletions: _deletions, settings: _settings, ...row } = a;
+    const { items: _items, deletions: _deletions, ...row } = a;
     return { ...row };
   }
 
@@ -90,19 +93,18 @@ export class InMemorySyncRepository implements SyncRepository {
     this.devices.delete(this.deviceKey(accountId, deviceId));
   }
 
-  async getChangesSince(accountId: string, since: number) {
+  async getChangesSince(accountId: string, since: number, sinceHeader: number) {
     const a = this.accounts.get(accountId);
     if (!a) throw new Error("account not found");
     const items = [...a.items.values()].filter((i) => i.rev > since);
     const deletions = [...a.deletions.values()].filter((d) => d.rev > since);
-    const settings = a.settings && a.settings.rev > since ? a.settings.ct : undefined;
     return {
       rev: a.rev,
       headerRev: a.headerRev,
-      header: a.headerRev > since ? a.header : undefined,
+      // headerRev is a SEPARATE counter from the item revision `since` — compare like-for-like.
+      header: a.headerRev > sinceHeader ? a.header : undefined,
       items,
       deletions,
-      settings,
     };
   }
 
@@ -125,9 +127,6 @@ export class InMemorySyncRepository implements SyncRepository {
     for (const del of input.deletions) {
       a.deletions.set(del.id, { ...del, rev: nextRev });
       a.items.delete(del.id);
-    }
-    if (input.settings) {
-      a.settings = { ct: input.settings, rev: nextRev };
     }
     a.rev = nextRev;
     return { rev: a.rev };

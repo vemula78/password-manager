@@ -20,10 +20,22 @@ const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS ?? "")
   .map((o) => o.trim())
   .filter(Boolean);
 
-// A crude in-process token bucket is enough here: GET /kdf is the only unauthenticated
-// route and the deployment target is a single small VM, not a fleet behind a shared cache.
+// A crude in-process token bucket is enough here: the deployment target is a single small
+// VM, not a fleet behind a shared cache. /register and /login perform Argon2 work for
+// unauthenticated callers, so they get tighter limits than /kdf (which does none) — both to
+// bound CPU/memory exhaustion and to make online password guessing costlier.
 const KDF_RATE_LIMIT_WINDOW_MS = 60_000;
 const KDF_RATE_LIMIT_MAX = 30;
+const REGISTER_RATE_LIMIT_WINDOW_MS = 10 * 60_000;
+const REGISTER_RATE_LIMIT_MAX = 5;
+const LOGIN_RATE_LIMIT_WINDOW_MS = 60_000;
+const LOGIN_RATE_LIMIT_MAX = 10;
+const REFRESH_RATE_LIMIT_WINDOW_MS = 60_000;
+const REFRESH_RATE_LIMIT_MAX = 20;
+
+// Personal single-user server: open by default only until the first account exists, then
+// closed unless the operator explicitly opts back in (e.g. to add a second account).
+const REGISTRATION_OPEN = process.env.REGISTRATION_OPEN === "true";
 
 async function main(): Promise<void> {
   if (!DATABASE_URL) {
@@ -36,7 +48,10 @@ async function main(): Promise<void> {
   const pool = createPool(DATABASE_URL);
   await runMigrations(pool);
   const repo = new PgSyncRepository(pool);
-  const config: ServerConfig = { serverSecret: Buffer.from(SERVER_SECRET, "utf8") };
+  const config: ServerConfig = {
+    serverSecret: Buffer.from(SERVER_SECRET, "utf8"),
+    registrationOpen: REGISTRATION_OPEN,
+  };
 
   const app = await buildApp(repo, config, { allowedOrigins: ALLOWED_ORIGINS });
   await app.listen({ port: PORT, host: "0.0.0.0" });
@@ -80,21 +95,37 @@ export async function buildApp(
     }
   });
 
-  const kdfHits = new Map<string, { count: number; windowStart: number }>();
-  app.addHook("onRequest", async (req, reply) => {
-    if (req.method === "GET" && req.url.startsWith("/kdf")) {
-      const ip = req.ip;
+  // Returns true if `key` is still within its bucket's limit (and records the hit).
+  function makeBucket(windowMs: number, max: number): (key: string) => boolean {
+    const hits = new Map<string, { count: number; windowStart: number }>();
+    return (key: string) => {
       const now = Date.now();
-      const entry = kdfHits.get(ip);
-      if (!entry || now - entry.windowStart > KDF_RATE_LIMIT_WINDOW_MS) {
-        kdfHits.set(ip, { count: 1, windowStart: now });
-      } else {
-        entry.count += 1;
-        if (entry.count > KDF_RATE_LIMIT_MAX) {
-          reply.code(429).send({ error: "rate limited" });
-          return reply;
-        }
+      const entry = hits.get(key);
+      if (!entry || now - entry.windowStart > windowMs) {
+        hits.set(key, { count: 1, windowStart: now });
+        return true;
       }
+      entry.count += 1;
+      return entry.count <= max;
+    };
+  }
+
+  const kdfBucket = makeBucket(KDF_RATE_LIMIT_WINDOW_MS, KDF_RATE_LIMIT_MAX);
+  const registerBucket = makeBucket(REGISTER_RATE_LIMIT_WINDOW_MS, REGISTER_RATE_LIMIT_MAX);
+  const loginBucket = makeBucket(LOGIN_RATE_LIMIT_WINDOW_MS, LOGIN_RATE_LIMIT_MAX);
+  const refreshBucket = makeBucket(REFRESH_RATE_LIMIT_WINDOW_MS, REFRESH_RATE_LIMIT_MAX);
+
+  app.addHook("onRequest", async (req, reply) => {
+    const ip = req.ip;
+    let withinLimit = true;
+    if (req.method === "GET" && req.url.startsWith("/kdf")) withinLimit = kdfBucket(ip);
+    else if (req.method === "POST" && req.url.startsWith("/register")) withinLimit = registerBucket(ip);
+    else if (req.method === "POST" && req.url.startsWith("/login")) withinLimit = loginBucket(ip);
+    else if (req.method === "POST" && req.url.startsWith("/refresh")) withinLimit = refreshBucket(ip);
+
+    if (!withinLimit) {
+      reply.code(429).send({ error: "rate limited" });
+      return reply;
     }
   });
 

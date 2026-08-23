@@ -84,6 +84,8 @@ export interface AppCtx {
   setAuthToken(token: string): void;
   syncStatus: SyncStatus;
   syncNow(opts?: { silent?: boolean }): Promise<void>;
+  /** Rotate the server's header + auth verifier after a master-password change. */
+  pushSyncHeader(newMasterPassword: string): Promise<void | null>;
 }
 
 const Ctx = createContext<AppCtx | null>(null);
@@ -136,7 +138,7 @@ export function AppProvider(props: {
     });
   }, []);
 
-  const { status: syncStatus, syncNow } = useSync(
+  const { status: syncStatus, syncNow, pushHeaderNow } = useSync(
     store,
     config,
     updateConfig,
@@ -260,8 +262,9 @@ export function AppProvider(props: {
       setAuthToken: props.onAuthToken,
       syncStatus,
       syncNow,
+      pushSyncHeader: pushHeaderNow,
     }),
-    [store, rev, refresh, lockNow, requestReauth, copyWithClear, toast, config, updateConfig, route, props.onReplaceStore, props.authTokenB64, props.onAuthToken, syncStatus, syncNow],
+    [store, rev, refresh, lockNow, requestReauth, copyWithClear, toast, config, updateConfig, route, props.onReplaceStore, props.authTokenB64, props.onAuthToken, syncStatus, syncNow, pushHeaderNow],
   );
 
   return (

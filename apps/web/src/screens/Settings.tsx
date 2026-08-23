@@ -319,7 +319,23 @@ function ChangePasswordModal(props: { onClose: () => void }) {
       }
       await store.changeMasterPassword(pwd, { masterPassword: current });
       app.refresh();
-      app.toast("Master password changed", "success");
+
+      // Rotate the sync server's copy of the header and its auth verifier in the same
+      // breath. If this is skipped the server keeps the OLD header, the OLD password stays
+      // valid against it, and other devices never learn about the change — so a failure here
+      // has to be stated plainly rather than swallowed.
+      try {
+        await app.pushSyncHeader(pwd);
+        app.toast("Master password changed", "success");
+      } catch (e) {
+        app.toast(
+          "Your master password was changed on this device, but the sync server could not be " +
+            "updated: " +
+            (e instanceof Error ? e.message : String(e)) +
+            " Your old password still works for sync until you retry from Settings → Sync.",
+          "error",
+        );
+      }
       props.onClose();
     } catch (e) {
       setErr(e instanceof Error ? e.message : String(e));

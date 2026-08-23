@@ -2,9 +2,11 @@
 // bookkeeping. Offline-first — every failure here leaves the vault fully usable locally.
 import type { VaultStore } from "@pw/core";
 import {
+  deriveAuthToken,
   RollbackDetectedError,
   SyncAuthError,
   SyncClient,
+  SyncIntegrityError,
   type SyncOutcome,
 } from "@pw/sync";
 import { useCallback, useRef, useState } from "react";
@@ -62,7 +64,11 @@ export function useSync(
         const base = await loadSyncBase();
         const res = await c.sync(
           store,
-          { lastSyncRev: config.sync.lastSyncRev, highestSeenRev: config.sync.highestSeenRev },
+          {
+            lastSyncRev: config.sync.lastSyncRev,
+            highestSeenRev: config.sync.highestSeenRev,
+            lastHeaderRev: config.sync.lastHeaderRev,
+          },
           base,
         );
 
@@ -72,6 +78,7 @@ export function useSync(
             ...config.sync,
             lastSyncRev: res.state.lastSyncRev,
             highestSeenRev: res.state.highestSeenRev,
+            lastHeaderRev: res.state.lastHeaderRev ?? config.sync.lastHeaderRev,
             lastSyncAt: new Date().toISOString(),
             lastError: null,
           },
@@ -97,7 +104,9 @@ export function useSync(
         }
       } catch (err) {
         const msg =
-          err instanceof RollbackDetectedError
+          err instanceof SyncIntegrityError
+            ? `${err.message} Nothing was changed on this device; sync will retry.`
+            : err instanceof RollbackDetectedError
             ? err.message
             : err instanceof SyncAuthError
               ? "Sync sign-in failed. If you changed your master password on another device, unlock with the new one."
@@ -116,5 +125,43 @@ export function useSync(
     [store, config, updateConfig, toast, authTokenB64, client],
   );
 
-  return { status, syncNow };
+  /**
+   * Push a rotated header (master-password change) to the server, atomically with the new
+   * auth verifier. Without this the server keeps the OLD header and the OLD password stays
+   * valid against it, and other devices never learn about the change — the single most
+   * dangerous way for a password change to half-succeed.
+   *
+   * Returns null if sync is off (nothing to do), otherwise throws on failure so the caller
+   * can tell the user their password changed locally but NOT on the server.
+   */
+  const pushHeaderNow = useCallback(
+    async (newMasterPassword: string): Promise<void | null> => {
+      const { enabled, serverUrl, accountId } = config.sync;
+      if (!enabled || !serverUrl || !accountId) return null;
+
+      const c = client();
+      const newToken = deriveAuthToken(newMasterPassword, store.getHeader().kdf);
+      if (!c.isSignedIn()) {
+        // Sign in with the OLD token — the server has not rotated yet.
+        if (!authTokenB64) throw new SyncAuthError("Not signed in to the sync server.");
+        await c.login(accountId, authTokenB64);
+      }
+      const res = await c.pushHeader(
+        store,
+        {
+          lastSyncRev: config.sync.lastSyncRev,
+          highestSeenRev: config.sync.highestSeenRev,
+          lastHeaderRev: config.sync.lastHeaderRev,
+        },
+        newToken,
+      );
+      updateConfig({
+        sync: { ...config.sync, lastHeaderRev: res.state.lastHeaderRev ?? 0, lastError: null },
+      });
+      return;
+    },
+    [store, config, updateConfig, authTokenB64, client],
+  );
+
+  return { status, syncNow, pushHeaderNow };
 }

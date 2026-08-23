@@ -14,6 +14,8 @@ export interface SyncConfig {
    * refuses to apply it and warns. Monotonic, never decreased.
    */
   highestSeenRev: number;
+  /** Header revision last seen. Separate counter from the item revision — see SYNC-DESIGN. */
+  lastHeaderRev: number;
   lastSyncAt: string | null;
   lastError: string | null;
 }
@@ -45,6 +47,7 @@ const DEFAULT_SYNC: SyncConfig = {
   accountId: "",
   lastSyncRev: 0,
   highestSeenRev: 0,
+  lastHeaderRev: 0,
   lastSyncAt: null,
   lastError: null,
 };

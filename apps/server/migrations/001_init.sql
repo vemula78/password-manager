@@ -21,10 +21,14 @@ CREATE TABLE IF NOT EXISTS items (
   PRIMARY KEY (account_id, item_id)
 );
 
+-- Sealed tombstone: `ct` is an AEAD ciphertext (under the vault key) hiding the deletion
+-- time and originating device. The server stores and returns it as an opaque blob only —
+-- it must never hold deletedAt/deviceId in plaintext (SYNC-DESIGN.md §3.2, core/vault.ts
+-- SealedTombstone). Deliberately no updated_at/deleted_at column here.
 CREATE TABLE IF NOT EXISTS deletions (
   account_id uuid NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
   item_id text NOT NULL,
-  deleted_at timestamptz NOT NULL,
+  ct jsonb NOT NULL,
   rev bigint NOT NULL,
   PRIMARY KEY (account_id, item_id)
 );
@@ -44,10 +48,4 @@ CREATE TABLE IF NOT EXISTS audit_shards (
   ct jsonb NOT NULL,
   rev bigint NOT NULL,
   PRIMARY KEY (account_id, device_id)
-);
-
-CREATE TABLE IF NOT EXISTS settings (
-  account_id uuid PRIMARY KEY REFERENCES accounts(id) ON DELETE CASCADE,
-  ct jsonb NOT NULL,
-  rev bigint NOT NULL DEFAULT 0
 );

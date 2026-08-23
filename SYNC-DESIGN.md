@@ -161,8 +161,14 @@ destroyed — the cost of a wrong LWW call is a spurious duplicate, not data los
   audit log is a record of what happened *on this device*, and a merged cross-device log is a
   reporting nicety, not a security control. Each device keeps its own local log. Revisit if
   cross-device forensics is ever wanted; the shard design above still applies.
-- **Settings**: single blob, last-writer-wins. Low stakes; a lost theme preference is not a
-  credential.
+- **Settings**: **not synced** (revised 23-Aug-2026 during the review fixes). LWW settings
+  sync turned out to need core API that does not exist — `VaultStore` exposes only plaintext
+  settings, the Vault Key is private, and `VaultSettings` has no `updatedAt` to compare — and
+  encrypting them in `packages/sync` would breach the "all crypto through core" rule. Rather
+  than leave a settings blob half-wired in the protocol, it was removed. This is also
+  defensible on its own terms: auto-lock and clipboard-clear timings reasonably differ between
+  a phone and a desktop. Revisit only with the core additions listed in
+  NOTES/sync-review-outcomes.md.
 
 ### Metadata minimisation on the wire (revised 23-Aug-2026)
 

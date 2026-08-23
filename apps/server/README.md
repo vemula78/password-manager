@@ -2,28 +2,55 @@
 
 Dumb, authenticated, versioned ciphertext store. See `../../SYNC-DESIGN.md` for the binding
 design (threat model, protocol, schema). This server never decrypts anything — every `ct`
-field is opaque JSON to it.
+field is opaque JSON to it, **including deletion tombstones**: a tombstone is `{ id, ct }`
+where `ct` is an AEAD ciphertext (sealed under the vault key) hiding the deletion time and
+originating device. The server stores and returns `ct` verbatim and never parses it.
 
 ## Endpoints
 
-- `GET  /kdf?accountId=...` — unauthenticated, rate-limited. Returns the account's KDF
-  params, or a deterministic dummy for unknown accounts.
-- `POST /register` — creates an account, returns a session.
-- `POST /login` — authenticates with `authTokenB64`, returns a session.
-- `POST /refresh` — rotates the refresh token, returns a new session.
-- `POST /devices/revoke` — deletes a device's refresh token.
-- `GET  /vault/changes?since=<rev>` — bearer-authenticated pull.
+- `GET  /kdf?accountId=...` — unauthenticated, rate-limited (30/min/IP). Returns the
+  account's KDF params, or a deterministic dummy for unknown accounts.
+- `POST /register` — creates an account, returns a session. Rate-limited (5/10min/IP).
+  Closed by default once one account exists — see `REGISTRATION_OPEN` below.
+- `POST /login` — authenticates with `authTokenB64`, returns a session. Rate-limited
+  (10/min/IP).
+- `POST /refresh` — rotates the refresh token, returns a new session. Rate-limited
+  (20/min/IP).
+- `POST /devices/revoke` — **bearer-authenticated.** Deletes the caller's own device's
+  refresh token; the account is taken from the access token, never from the request body,
+  so a device can only ever revoke a device on its own account. Body is `{ deviceId }`.
+- `GET  /vault/changes?since=<rev>&sinceHeader=<headerRev>` — bearer-authenticated pull.
+  `since` and `sinceHeader` are separate counters — the header is returned iff
+  `headerRev > sinceHeader`, never compared against the item `since`. A missing
+  `sinceHeader` defaults to `0` for compatibility with older clients.
 - `POST /vault/changes` — bearer-authenticated push (optimistic concurrency on `baseRev`).
+  `deletions` are sealed tombstones (`{ id, ct }`).
 - `POST /vault/header` — bearer-authenticated header compare-and-set (master password /
   recovery rotation).
 
+Argon2id hashing (register/login) is additionally capped at 4 concurrent operations
+process-wide, so a burst of requests queues rather than exhausting memory.
+
 ## Environment variables
 
-| Variable        | Required | Notes                                                        |
-|-----------------|----------|---------------------------------------------------------------|
-| `PORT`          | no       | default `8787`                                                 |
-| `DATABASE_URL`  | yes      | `postgres://user:pass@host:5432/dbname`                        |
-| `SERVER_SECRET` | yes      | ≥32 random bytes; signs access tokens and the dummy-KDF HMAC. Rotating it logs out every device. Generate with `openssl rand -base64 48`. |
+| Variable            | Required | Notes                                                        |
+|---------------------|----------|---------------------------------------------------------------|
+| `PORT`              | no       | default `8787`                                                 |
+| `DATABASE_URL`      | yes      | `postgres://user:pass@host:5432/dbname`                        |
+| `SERVER_SECRET`     | yes      | ≥32 random bytes; signs access tokens and the dummy-KDF HMAC. Rotating it logs out every device. Generate with `openssl rand -base64 48`. |
+| `ALLOWED_ORIGINS`   | no       | comma-separated exact-origin allowlist for browser CORS (e.g. `https://app.example.org`). Empty = no cross-origin browser access at all (same-origin only); there is no wildcard option, by design — see SYNC-DESIGN.md §8. |
+| `REGISTRATION_OPEN` | no       | `true` to allow creating another account after the first already exists. This is a personal single-user server, so the default (`false`/unset) closes registration the moment one account exists — unbounded account creation has no legitimate use here. |
+
+## Building and running
+
+```
+npm run build   # tsc -p tsconfig.build.json -> dist/
+npm start       # node dist/index.js — needs DATABASE_URL and SERVER_SECRET
+```
+
+`npm run dev` builds and runs `dist/dev.js`: an in-memory server (no Postgres, nothing
+persisted, registration always open) for trying sync across two browser profiles locally.
+Never point a real vault at it.
 
 ## Deploying on an Ubuntu VM behind nginx + TLS
 
@@ -33,6 +60,7 @@ field is opaque JSON to it.
    ```
    POSTGRES_PASSWORD=<random>
    SERVER_SECRET=<output of: openssl rand -base64 48>
+   ALLOWED_ORIGINS=https://app.example.org
    ```
 4. `docker compose up -d` (builds the server image from the repo root — run this from
    `apps/server` so the compose file's relative build context resolves, or pass

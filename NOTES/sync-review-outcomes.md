@@ -48,14 +48,49 @@ attacker can reset it. That is the same class as the already-accepted local-roll
 codex-review-outcomes.md item 5, and the same answer applies: an attacker with that level of
 local access can keylog the master password anyway.
 
-## Fixed in packages/sync and apps/server
+## Fixed in packages/sync
 
-See the commits following the review. Findings 2 (password change never rotated the server
-header or auth verifier), 3 (header revision compared against the item revision, so header
-changes were invisible), 6 (a failed item authentication still advanced the revision,
-permanently losing that credential on that device), 7 (unauthenticated device revocation),
-9 (no rate limiting on /register, /login, /refresh) and 10 (settings advertised in the
-protocol but never synced).
+**2. High — a master-password change never reached the server.** `POST /vault/header` existed
+but nothing called it, so after a password change the server kept the old header and the old
+auth verifier: the old password stayed valid against it and other devices never learned about
+the change. `SyncClient.pushHeader` now does a compare-and-set on the header revision and
+rotates the header and verifier together; a 409 raises its own error type stating explicitly
+that the server was *not* updated, because silently continuing would leave the user believing
+their password had changed everywhere. Wired into the web password-change flow.
+
+**3. High — the header revision was compared against the item revision.** Two independent
+counters were being compared to each other, so once the item revision overtook the header
+revision, header changes became permanently invisible. `SyncState` now tracks `lastHeaderRev`
+separately and the pull sends `sinceHeader`.
+
+**6. High — a failed authentication still advanced the revision.** An item that failed its
+AEAD check was warned about and skipped, but the merge still committed and `lastSyncRev`
+advanced — so a server could corrupt one newly-created item once and that credential would be
+permanently missing on that device. Any failure now aborts the whole cycle before anything is
+applied or advanced, via a typed `SyncIntegrityError` carrying every failure found.
+
+**10. Low — settings were advertised but never synced.** Resolved by REMOVING settings from
+the protocol rather than implementing LWW, because implementing it needs core API that does
+not exist (`VaultStore` exposes only plaintext settings, the Vault Key is private, and
+`VaultSettings` has no `updatedAt`), and encrypting in `packages/sync` would breach the
+"all crypto through core" rule. Settings are now documented as device-local, which is also
+defensible on its own: auto-lock timings reasonably differ between a phone and a desktop.
+The dead server-side path was removed too.
+
+## Fixed in apps/server
+
+**7. Medium — device revocation was unauthenticated.** Anyone knowing an account and device id
+could clear a device's refresh token repeatedly. It now requires a bearer token and derives
+the account from the token rather than the body.
+
+**9. Medium — no rate limiting on /register, /login, /refresh.** Each performed unauthenticated
+Argon2 work. All three are now rate-limited (tighter than /kdf), a process-wide semaphore caps
+concurrent Argon2 operations, and registration closes automatically once the first account
+exists unless `REGISTRATION_OPEN` is set — an unbounded account-creation endpoint has no
+legitimate use on a personal single-user server.
+
+Plus the server side of the sealed-tombstone change: the `deletions` table stores an opaque
+ciphertext instead of a plaintext deletion timestamp.
 
 ## What the review confirmed as sound
 

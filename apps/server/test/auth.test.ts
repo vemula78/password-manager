@@ -125,7 +125,8 @@ describe("auth routes", () => {
         deviceLabel: "MacBook",
       },
     });
-    const { accountId, refreshToken } = reg.json();
+    const { accountId, accessToken, refreshToken } = reg.json();
+    const auth = { authorization: `Bearer ${accessToken}` };
 
     const refreshed = await app.inject({
       method: "POST",
@@ -143,11 +144,13 @@ describe("auth routes", () => {
     });
     expect(reusedOld.statusCode).toBe(401);
 
-    await app.inject({
+    const revoke = await app.inject({
       method: "POST",
       url: "/devices/revoke",
-      payload: { accountId, deviceId: "device-1" },
+      headers: auth,
+      payload: { deviceId: "device-1" },
     });
+    expect(revoke.statusCode).toBe(204);
 
     const afterRevoke = await app.inject({
       method: "POST",
@@ -160,5 +163,201 @@ describe("auth routes", () => {
   it("rejects requests without a bearer token", async () => {
     const res = await app.inject({ method: "GET", url: "/vault/changes?since=0" });
     expect(res.statusCode).toBe(401);
+  });
+
+  describe("device revocation authorization (review §7)", () => {
+    async function register(app: Awaited<ReturnType<typeof buildApp>>, deviceId = "device-1") {
+      const reg = await app.inject({
+        method: "POST",
+        url: "/register",
+        payload: {
+          label: "primary",
+          kdf: fakeKdf(),
+          authTokenB64: "Y29ycmVjdA==",
+          header: fakeHeader(),
+          deviceId,
+          deviceLabel: "MacBook",
+        },
+      });
+      return reg.json() as { accountId: string; accessToken: string; refreshToken: string };
+    }
+
+    it("rejects an unauthenticated revoke request", async () => {
+      const { accountId } = await register(app);
+      const res = await app.inject({
+        method: "POST",
+        url: "/devices/revoke",
+        payload: { accountId, deviceId: "device-1" },
+      });
+      expect(res.statusCode).toBe(401);
+    });
+
+    it("cannot revoke a device on a different account (accountId is derived from the token, not the body)", async () => {
+      const victim = await register(app, "victim-device");
+      const auth = { authorization: `Bearer ${victim.accessToken}` };
+
+      // Attacker holds a valid token (their own, or here the victim's — either way the
+      // accountId used is whatever the TOKEN says) but supplies a fabricated cross-account
+      // accountId/deviceId in the body, hoping the server trusts the body instead.
+      const res = await app.inject({
+        method: "POST",
+        url: "/devices/revoke",
+        headers: auth,
+        payload: { accountId: "someone-elses-account", deviceId: "someone-elses-device" },
+      });
+      // The body's accountId is ignored; the token's own account has no such device.
+      expect(res.statusCode).toBe(404);
+
+      // The victim's own device is untouched — refresh still works.
+      const refreshed = await app.inject({
+        method: "POST",
+        url: "/refresh",
+        payload: { accountId: victim.accountId, deviceId: "victim-device", refreshToken: victim.refreshToken },
+      });
+      expect(refreshed.statusCode).toBe(200);
+    });
+
+    it("revokes only the caller's own device", async () => {
+      const { accessToken, accountId, refreshToken } = await register(app);
+      const auth = { authorization: `Bearer ${accessToken}` };
+
+      const res = await app.inject({
+        method: "POST",
+        url: "/devices/revoke",
+        headers: auth,
+        payload: { deviceId: "device-1" },
+      });
+      expect(res.statusCode).toBe(204);
+
+      const refreshed = await app.inject({
+        method: "POST",
+        url: "/refresh",
+        payload: { accountId, deviceId: "device-1", refreshToken },
+      });
+      expect(refreshed.statusCode).toBe(401);
+    });
+  });
+
+  // Review §9: /register, /login, /refresh were unauthenticated and unlimited.
+  describe("rate limiting and registration gating (review §9)", () => {
+    it("closes registration by default once one account exists", async () => {
+      const first = await app.inject({
+        method: "POST",
+        url: "/register",
+        payload: {
+          label: "primary",
+          kdf: fakeKdf(),
+          authTokenB64: "Y29ycmVjdA==",
+          header: fakeHeader(),
+          deviceId: "device-1",
+          deviceLabel: "MacBook",
+        },
+      });
+      expect(first.statusCode).toBe(201);
+
+      const second = await app.inject({
+        method: "POST",
+        url: "/register",
+        payload: {
+          label: "second",
+          kdf: fakeKdf(),
+          authTokenB64: "b3RoZXI=",
+          header: fakeHeader(),
+          deviceId: "device-2",
+          deviceLabel: "iPhone",
+        },
+      });
+      expect(second.statusCode).toBe(403);
+    });
+
+    it("REGISTRATION_OPEN allows a second account when explicitly set", async () => {
+      const openRepo = new InMemorySyncRepository();
+      const openApp = await buildApp(openRepo, { ...config, registrationOpen: true });
+
+      const first = await openApp.inject({
+        method: "POST",
+        url: "/register",
+        payload: {
+          label: "primary",
+          kdf: fakeKdf(),
+          authTokenB64: "Y29ycmVjdA==",
+          header: fakeHeader(),
+          deviceId: "device-1",
+          deviceLabel: "MacBook",
+        },
+      });
+      expect(first.statusCode).toBe(201);
+
+      const second = await openApp.inject({
+        method: "POST",
+        url: "/register",
+        payload: {
+          label: "second",
+          kdf: fakeKdf(),
+          authTokenB64: "b3RoZXI=",
+          header: fakeHeader(),
+          deviceId: "device-2",
+          deviceLabel: "iPhone",
+        },
+      });
+      expect(second.statusCode).toBe(201);
+    });
+
+    it("rate-limits /login per IP, tighter than /kdf's 30/min", async () => {
+      const reg = await app.inject({
+        method: "POST",
+        url: "/register",
+        payload: {
+          label: "primary",
+          kdf: fakeKdf(),
+          authTokenB64: "Y29ycmVjdA==",
+          header: fakeHeader(),
+          deviceId: "device-1",
+          deviceLabel: "MacBook",
+        },
+      });
+      const { accountId } = reg.json();
+
+      let sawRateLimited = false;
+      for (let i = 0; i < 15; i++) {
+        const res = await app.inject({
+          method: "POST",
+          url: "/login",
+          payload: { accountId, authTokenB64: "d3Jvbmc=", deviceId: "device-1", deviceLabel: "MacBook" },
+        });
+        if (res.statusCode === 429) {
+          sawRateLimited = true;
+          break;
+        }
+        expect(res.statusCode).toBe(401); // wrong password, but not yet rate-limited
+      }
+      expect(sawRateLimited).toBe(true);
+    });
+
+    it("rate-limits /register per IP", async () => {
+      const openRepo = new InMemorySyncRepository();
+      const openApp = await buildApp(openRepo, { ...config, registrationOpen: true });
+
+      let sawRateLimited = false;
+      for (let i = 0; i < 10; i++) {
+        const res = await openApp.inject({
+          method: "POST",
+          url: "/register",
+          payload: {
+            label: `account-${i}`,
+            kdf: fakeKdf(),
+            authTokenB64: "Y29ycmVjdA==",
+            header: fakeHeader(),
+            deviceId: `device-${i}`,
+            deviceLabel: "MacBook",
+          },
+        });
+        if (res.statusCode === 429) {
+          sawRateLimited = true;
+          break;
+        }
+      }
+      expect(sawRateLimited).toBe(true);
+    });
   });
 });

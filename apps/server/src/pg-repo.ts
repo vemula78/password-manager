@@ -2,7 +2,7 @@
 // in CI) — kept structurally identical to memory-repo.ts so route logic behaves the same
 // against either. `ct`/`header` values pass through as jsonb verbatim; never parsed here.
 import type pg from "pg";
-import type { Ciphertext, KdfParams, VaultHeader } from "@pw/core";
+import type { KdfParams, VaultHeader } from "@pw/core";
 import {
   AccountRow,
   DeletionRow,
@@ -31,6 +31,11 @@ export class PgSyncRepository implements SyncRepository {
        VALUES ($1, $2, $3, $4, $5, 0, 0)`,
       [input.id, input.label, Buffer.from(input.kdfSalt, "base64"), input.authHash, input.header],
     );
+  }
+
+  async hasAnyAccount(): Promise<boolean> {
+    const res = await this.pool.query(`SELECT 1 FROM accounts LIMIT 1`);
+    return res.rows.length > 0;
   }
 
   async getAccount(accountId: string): Promise<AccountRow | undefined> {
@@ -100,7 +105,7 @@ export class PgSyncRepository implements SyncRepository {
     ]);
   }
 
-  async getChangesSince(accountId: string, since: number) {
+  async getChangesSince(accountId: string, since: number, sinceHeader: number) {
     const client = await this.pool.connect();
     try {
       const acctRes = await client.query(
@@ -115,11 +120,7 @@ export class PgSyncRepository implements SyncRepository {
         [accountId, since],
       );
       const delRes = await client.query(
-        `SELECT item_id, deleted_at, rev FROM deletions WHERE account_id = $1 AND rev > $2`,
-        [accountId, since],
-      );
-      const settingsRes = await client.query(
-        `SELECT ct FROM settings WHERE account_id = $1 AND rev > $2`,
+        `SELECT item_id, ct, rev FROM deletions WHERE account_id = $1 AND rev > $2`,
         [accountId, since],
       );
 
@@ -129,20 +130,20 @@ export class PgSyncRepository implements SyncRepository {
         updatedAt: r.updated_at.toISOString(),
         rev: Number(r.rev),
       }));
+      // ct is opaque: a sealed tombstone under the vault key. Never inspected server-side.
       const deletions: DeletionRow[] = delRes.rows.map((r) => ({
         id: r.item_id,
-        deletedAt: r.deleted_at.toISOString(),
-        deviceId: "", // device attribution lives client-side; not stored server-side
+        ct: r.ct,
         rev: Number(r.rev),
       }));
 
       return {
         rev: Number(acct.rev),
         headerRev: Number(acct.header_rev),
-        header: Number(acct.header_rev) > since ? (acct.header as VaultHeader) : undefined,
+        // headerRev is a SEPARATE counter from the item revision `since` — compare like-for-like.
+        header: Number(acct.header_rev) > sinceHeader ? (acct.header as VaultHeader) : undefined,
         items,
         deletions,
-        settings: settingsRes.rows[0]?.ct as Ciphertext | undefined,
       };
     } finally {
       client.release();
@@ -181,23 +182,16 @@ export class PgSyncRepository implements SyncRepository {
       }
       for (const del of input.deletions) {
         await client.query(
-          `INSERT INTO deletions (account_id, item_id, deleted_at, rev)
+          `INSERT INTO deletions (account_id, item_id, ct, rev)
            VALUES ($1, $2, $3, $4)
            ON CONFLICT (account_id, item_id)
-           DO UPDATE SET deleted_at = EXCLUDED.deleted_at, rev = EXCLUDED.rev`,
-          [accountId, del.id, del.deletedAt, nextRev],
+           DO UPDATE SET ct = EXCLUDED.ct, rev = EXCLUDED.rev`,
+          [accountId, del.id, del.ct, nextRev],
         );
         await client.query(`DELETE FROM items WHERE account_id = $1 AND item_id = $2`, [
           accountId,
           del.id,
         ]);
-      }
-      if (input.settings) {
-        await client.query(
-          `INSERT INTO settings (account_id, ct, rev) VALUES ($1, $2, $3)
-           ON CONFLICT (account_id) DO UPDATE SET ct = EXCLUDED.ct, rev = EXCLUDED.rev`,
-          [accountId, input.settings, nextRev],
-        );
       }
       await client.query(`UPDATE accounts SET rev = $2 WHERE id = $1`, [accountId, nextRev]);
       await client.query("COMMIT");

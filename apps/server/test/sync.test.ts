@@ -89,7 +89,7 @@ describe("sync routes", () => {
     expect(stalePush.json()).toEqual({ error: "rev conflict", serverRev: 1 });
   });
 
-  it("a deletion tombstone removes the item and is visible on pull", async () => {
+  it("a deletion tombstone removes the item and is visible on pull, as an opaque sealed blob", async () => {
     const { accessToken } = await registerAndLogin(app);
     const auth = { authorization: `Bearer ${accessToken}` };
 
@@ -99,6 +99,9 @@ describe("sync routes", () => {
       headers: auth,
       payload: { baseRev: 0, items: [{ id: "a", ct: { nonceB64: "n", ctB64: "c" } }], deletions: [] },
     });
+    // Tombstones are SEALED (SealedTombstone = { id, ct }): the server never receives or
+    // stores a plaintext deletedAt/deviceId. `ct` is opaque and never inspected here.
+    const sealedCt = { nonceB64: "tn", ctB64: "tc" };
     const delPush = await app.inject({
       method: "POST",
       url: "/vault/changes",
@@ -106,7 +109,7 @@ describe("sync routes", () => {
       payload: {
         baseRev: 1,
         items: [],
-        deletions: [{ id: "a", deletedAt: new Date().toISOString(), deviceId: "device-1" }],
+        deletions: [{ id: "a", ct: sealedCt }],
       },
     });
     expect(delPush.statusCode).toBe(200);
@@ -115,7 +118,10 @@ describe("sync routes", () => {
     const body = pull.json();
     expect(body.items).toEqual([]);
     expect(body.deletions).toHaveLength(1);
-    expect(body.deletions[0].id).toBe("a");
+    expect(body.deletions[0]).toEqual({ id: "a", ct: sealedCt });
+    // No plaintext deletion metadata anywhere on the wire.
+    expect(body.deletions[0]).not.toHaveProperty("deletedAt");
+    expect(body.deletions[0]).not.toHaveProperty("deviceId");
   });
 
   it("rejects sync routes with an expired/garbage token", async () => {
@@ -207,4 +213,72 @@ describe("sync routes", () => {
       expect(login.statusCode).toBe(200);
     });
   });
+
+  // Review §3: header_rev and account rev are separate counters. GET /vault/changes must
+  // compare headerRev against `sinceHeader`, never against the item `since` — otherwise a
+  // device whose item rev is already ahead of the header rev never sees a header change.
+  it("returns the header when headerRev > sinceHeader even though item rev is far ahead (rev=10, headerRev=1)", async () => {
+    const { accessToken } = await registerAndLogin(app);
+    const auth = { authorization: `Bearer ${accessToken}` };
+
+    // Push 10 item revisions.
+    for (let i = 0; i < 10; i++) {
+      const push = await app.inject({
+        method: "POST",
+        url: "/vault/changes",
+        headers: auth,
+        payload: { baseRev: i, items: [{ id: `item-${i}`, ct: { nonceB64: "n", ctB64: "c" } }], deletions: [] },
+      });
+      expect(push.statusCode).toBe(200);
+    }
+
+    // One header push -> headerRev becomes 1.
+    const headerPush = await app.inject({
+      method: "POST",
+      url: "/vault/header",
+      headers: auth,
+      payload: { baseHeaderRev: 0, header: fakeHeader() },
+    });
+    expect(headerPush.statusCode).toBe(200);
+    expect(headerPush.json()).toEqual({ rev: 1 });
+
+    // A device already at item rev=10 pulling with sinceHeader=0 MUST still get the header —
+    // comparing headerRev against `since` (10) would wrongly withhold it (1 > 10 is false).
+    const pull = await app.inject({
+      method: "GET",
+      url: "/vault/changes?since=10&sinceHeader=0",
+      headers: auth,
+    });
+    expect(pull.statusCode).toBe(200);
+    const body = pull.json();
+    expect(body.rev).toBe(10);
+    expect(body.headerRev).toBe(1);
+    expect(body.header).toBeDefined();
+
+    // Once the device has recorded sinceHeader=1, it must not be sent again.
+    const pullAgain = await app.inject({
+      method: "GET",
+      url: "/vault/changes?since=10&sinceHeader=1",
+      headers: auth,
+    });
+    expect(pullAgain.json().header).toBeUndefined();
+  });
+
+  // A missing sinceHeader must be treated as 0, for compatibility with a client that hasn't
+  // started sending it yet.
+  it("treats a missing sinceHeader as 0", async () => {
+    const { accessToken } = await registerAndLogin(app);
+    const auth = { authorization: `Bearer ${accessToken}` };
+
+    await app.inject({
+      method: "POST",
+      url: "/vault/header",
+      headers: auth,
+      payload: { baseHeaderRev: 0, header: fakeHeader() },
+    });
+
+    const pull = await app.inject({ method: "GET", url: "/vault/changes?since=0", headers: auth });
+    expect(pull.json().header).toBeDefined();
+  });
+
 });
