@@ -52,22 +52,53 @@ npm start       # node dist/index.js — needs DATABASE_URL and SERVER_SECRET
 persisted, registration always open) for trying sync across two browser profiles locally.
 Never point a real vault at it.
 
-## Deploying on an Ubuntu VM behind nginx + TLS
+## Deploying: web app on GitHub Pages, sync server on an Azure Linux VM
 
-1. Install Docker and Docker Compose on the VM.
-2. Copy this `apps/server` directory to the VM (or clone the repo and `cd apps/server`).
+This is the recommended split. The two halves are deliberately on different origins:
+GitHub Pages serves the JavaScript, this VM serves only ciphertext. A compromise of the
+VM must not be able to ship tampered JavaScript that steals the master password
+(SYNC-DESIGN.md §8), which is exactly what co-hosting them would allow.
+
+**Nothing secret goes in the GitHub repo.** GitHub holds source code and serves the built
+PWA. Vault ciphertext lives only in this server's Postgres volume and on your devices.
+
+### 1. Web app (GitHub Pages)
+
+Already wired: `.github/workflows/deploy-web.yml` builds `apps/web` and publishes to
+Pages on every push to `main`. Enable it once in the repo's *Settings → Pages → Source →
+GitHub Actions*. The result is served at `https://<user>.github.io/<repo>/`; the origin —
+the part the server allowlists — is `https://<user>.github.io`, with no path.
+
+(`deploy-cloudflare-pages.yml` targets the same app. Keep whichever you actually use and
+delete the other, so a push does not publish two divergent copies.)
+
+### 2. Azure VM
+
+Create an Ubuntu 22.04/24.04 VM (B1s/B2s is ample; this is a low-traffic personal
+service). In its Network Security Group open **only** TCP 22, 80 and 443 — never 8787,
+which is bound to loopback and reached only through nginx. Point a DNS A record, e.g.
+`sync.example.org`, at the VM's public IP.
+
+### 3. Server
+
+1. Install Docker and the Compose plugin.
+2. Clone the repo on the VM and `cd apps/server`.
 3. Create `apps/server/.env`:
    ```
    POSTGRES_PASSWORD=<random>
    SERVER_SECRET=<output of: openssl rand -base64 48>
-   ALLOWED_ORIGINS=https://app.example.org
+   ALLOWED_ORIGINS=https://<user>.github.io
+   REGISTRATION_OPEN=true
    ```
-4. `docker compose up -d` (builds the server image from the repo root — run this from
-   `apps/server` so the compose file's relative build context resolves, or pass
-   `--build` with the repo root as context if you vendor a copy).
-5. Confirm it's up: `curl http://127.0.0.1:8787/kdf?accountId=test` should return a JSON
-   `{ "kdf": ... }` body — the server binds `127.0.0.1` only, not the public interface.
-6. Point nginx at it, terminating TLS (Let's Encrypt via certbot):
+   `ALLOWED_ORIGINS` must be the exact scheme+host of the Pages site, no trailing slash
+   and no path — get it wrong and every browser request fails CORS preflight. Set
+   `REGISTRATION_OPEN=true` only until your first account exists, then remove the line and
+   `docker compose up -d` again.
+4. `docker compose up -d` from `apps/server`. The compose file sets the build context to
+   the repo root because the image needs `packages/core` and `packages/sync`.
+5. Confirm it is up: `curl "http://127.0.0.1:8787/kdf?accountId=test"` returns a JSON
+   `kdf` body. It is not reachable from outside the VM at this point, by design.
+6. nginx + TLS in front of it:
    ```nginx
    server {
        listen 443 ssl http2;
@@ -87,8 +118,15 @@ Never point a real vault at it.
    }
    ```
 7. `sudo certbot --nginx -d sync.example.org` to obtain and auto-renew the certificate.
-8. `docker compose logs -f server` to confirm requests are being served. Logs contain
-   account UUIDs and revision numbers only — never ciphertext or tokens.
+   TLS is not optional: the bearer token is a live credential on every request.
+8. `docker compose logs -f server` to watch requests. Logs contain account UUIDs and
+   revision numbers only — never ciphertext or tokens.
+
+### 4. Connect a device
+
+Open the Pages URL, unlock the vault, then *Settings → Sync*: server URL
+`https://sync.example.org`, create the account on the first device, and connect the rest
+with the same master password and the account ID the first device shows.
 
 ### Backups
 
@@ -104,5 +142,15 @@ npm install --workspace @pw/server --workspace @pw/core --workspace @pw/sync   #
 npx vitest run                                                                  # from apps/server
 ```
 
-Tests run against an in-memory repository and need no Postgres. `npx tsc --noEmit` type-checks
+Tests run against an in-memory repository and need no Postgres — which means `pg-repo.ts`
+is never executed by the default suite. To exercise the real Postgres path, bring up the
+compose stack (see above) and run the manual test against it:
+
+```
+LIVE_SERVER=http://127.0.0.1:8787 npx vitest run test/live-pg.manual.test.ts
+```
+
+It registers an account and syncs two devices through real HTTP and real Postgres. It
+writes to whatever database it points at, so use a throwaway stack, never your live one.
+Without `LIVE_SERVER` set, `*.manual.test.ts` is excluded. `npx tsc --noEmit` type-checks
 against the same strict config as `packages/core`.

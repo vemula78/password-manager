@@ -4,3 +4,8 @@ dist/
 *.log
 .DS_Store
 coverage/
+
+# Secrets: apps/server/.env holds SERVER_SECRET and POSTGRES_PASSWORD.
+.env
+.env.*
+!.env.example

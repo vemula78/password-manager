@@ -9,7 +9,7 @@ RUN npm install --workspace @pw/server --workspace @pw/core --workspace @pw/sync
 COPY packages/core packages/core
 COPY packages/sync packages/sync
 COPY apps/server apps/server
-RUN npm install -g typescript && tsc -p apps/server --outDir apps/server/dist
+RUN npm install -g typescript && tsc -p apps/server/tsconfig.build.json
 
 FROM node:20-alpine
 WORKDIR /repo

@@ -15,6 +15,13 @@ import {
   SyncRepository,
 } from "./repo.js";
 
+// `accounts.id` is a uuid column, so Postgres raises 22P02 on any non-uuid input. That
+// input is unauthenticated and caller-controlled (`GET /kdf?accountId=`, `POST /login`),
+// so an unguarded lookup turns a malformed id into a 500 with a database error instead of
+// the deliberate "unknown account" path — which is what keeps account enumeration and the
+// login timing gap closed. Treat malformed as simply not found.
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 export class PgSyncRepository implements SyncRepository {
   constructor(private pool: pg.Pool) {}
 
@@ -39,6 +46,7 @@ export class PgSyncRepository implements SyncRepository {
   }
 
   async getAccount(accountId: string): Promise<AccountRow | undefined> {
+    if (!UUID_RE.test(accountId)) return undefined;
     const res = await this.pool.query(
       `SELECT id, label, kdf_salt, auth_hash, header, header_rev, rev, created_at
        FROM accounts WHERE id = $1`,

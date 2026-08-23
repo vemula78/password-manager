@@ -15,5 +15,15 @@ export default defineConfig({
         .replace(/dist[\/\\].*$/, "dist/modules-sumo/libsodium-wrappers.js"),
     },
   },
-  test: { globals: true },
+  test: {
+    globals: true,
+    // *.manual.test.ts needs a live `docker compose up` stack (real Postgres over real
+    // HTTP), so it is skipped unless LIVE_SERVER points at one:
+    //   LIVE_SERVER=http://127.0.0.1:8787 npx vitest run test/live-pg.manual.test.ts
+    exclude: [
+      "**/node_modules/**",
+      "**/dist/**",
+      ...(process.env.LIVE_SERVER ? [] : ["**/*.manual.test.ts"]),
+    ],
+  },
 });

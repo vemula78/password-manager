@@ -17,7 +17,11 @@ services:
       retries: 10
 
   server:
-    build: .
+    # Dockerfile COPYs from the monorepo root (it needs packages/core and packages/sync),
+    # so the build context is the repo root, not this directory.
+    build:
+      context: ../..
+      dockerfile: apps/server/Dockerfile
     restart: unless-stopped
     depends_on:
       postgres:
@@ -26,6 +30,11 @@ services:
       PORT: 8787
       DATABASE_URL: postgres://pwsync:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@postgres:5432/pwsync
       SERVER_SECRET: ${SERVER_SECRET:?set SERVER_SECRET in .env (32+ random bytes)}
+      # Exact origin of the hosted PWA, e.g. https://praveen.github.io. Empty = no
+      # cross-origin browser access at all, which breaks GitHub Pages hosting.
+      ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-}
+      # Leave unset after the first account is created.
+      REGISTRATION_OPEN: ${REGISTRATION_OPEN:-false}
     ports:
       - "127.0.0.1:8787:8787" # bind loopback only; nginx terminates TLS in front of this
 
