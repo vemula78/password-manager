@@ -16,7 +16,9 @@ const SHARE_WARNING = "Never share your master password.";
 
 type Step = "welcome" | "kit" | "verify" | "restore";
 
-export function Onboarding(props: { onUnlocked: (s: VaultStore) => void }) {
+export function Onboarding(props: {
+  onUnlocked: (s: VaultStore, authTokenB64: string | null) => void;
+}) {
   const [step, setStep] = useState<Step>("welcome");
   const [pwd, setPwd] = useState("");
   const [pwd2, setPwd2] = useState("");
@@ -52,7 +54,7 @@ export function Onboarding(props: { onUnlocked: (s: VaultStore) => void }) {
   const firstGroup = recoveryKey.split("-")[0] ?? "";
 
   const finish = () => {
-    if (store) props.onUnlocked(store);
+    if (store) props.onUnlocked(store, null);
   };
 
   const verify = () => {
@@ -130,7 +132,7 @@ export function Onboarding(props: { onUnlocked: (s: VaultStore) => void }) {
             <RestorePanel
               hasLocalVault={false}
               driveClientId={loadConfig().driveClientId}
-              onRestored={(s) => props.onUnlocked(s)}
+              onRestored={(s) => props.onUnlocked(s, null)}
               onCancel={() => setStep("welcome")}
             />
           </div>

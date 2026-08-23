@@ -16,11 +16,15 @@ import {
 } from "../lib/config";
 import { idbAdapter } from "../lib/storage";
 import { storeOptions } from "../lib/device";
+import { deriveAuthToken } from "@pw/sync";
 
 type Mode = "password" | "recovery" | "restore";
 type RecoveryStage = "key" | "post";
 
-export function Unlock(props: { blob: string; onUnlocked: (s: VaultStore) => void }) {
+export function Unlock(props: {
+  blob: string;
+  onUnlocked: (s: VaultStore, authTokenB64: string | null) => void;
+}) {
   const [mode, setMode] = useState<Mode>("password");
   const [pwd, setPwd] = useState("");
   const [err, setErr] = useState("");
@@ -48,7 +52,7 @@ export function Unlock(props: { blob: string; onUnlocked: (s: VaultStore) => voi
     return () => window.clearInterval(t);
   }, [blockedForMs > 0]);
 
-  const finishUnlock = async (store: VaultStore) => {
+  const finishUnlock = async (store: VaultStore, authToken: string | null = null) => {
     // Flush queued failed-unlock attempts into the encrypted audit log, then reset backoff.
     const pending = config.unlock.pendingAuditCount;
     if (pending > 0) {
@@ -58,7 +62,7 @@ export function Unlock(props: { blob: string; onUnlocked: (s: VaultStore) => voi
       );
     }
     setConfig(resetUnlockFails(config));
-    props.onUnlocked(store);
+    props.onUnlocked(store, authToken);
   };
 
   const unlockWithPwd = async () => {
@@ -67,7 +71,14 @@ export function Unlock(props: { blob: string; onUnlocked: (s: VaultStore) => voi
     await new Promise((r) => setTimeout(r, 30));
     try {
       const store = await VaultStore.open(props.blob, { password: pwd }, idbAdapter, storeOptions());
-      await finishUnlock(store);
+      // Derive the sync auth token here, the one moment we legitimately hold the master
+      // password. The password itself is never retained; only this one-way token is.
+      const cfg = loadConfig();
+      const authToken =
+        cfg.sync.enabled && cfg.sync.accountId
+          ? deriveAuthToken(pwd, store.getHeader().kdf)
+          : null;
+      await finishUnlock(store, authToken);
     } catch (e) {
       if (e instanceof WrongCredentialError) {
         const next = recordFailedUnlock(config);

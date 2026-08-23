@@ -6,6 +6,7 @@ import { useMemo, useRef, useState } from "react";
 import { KitOverlay, kitFromStore } from "../components/Kit";
 import { formatDateTime, Modal, StrengthMeter, Warning } from "../components/ui";
 import { useApp } from "../ctx";
+import { SyncPane } from "../components/SyncPane";
 
 export function Settings() {
   const app = useApp();
@@ -46,6 +47,8 @@ export function Settings() {
   return (
     <div className="screen narrow">
       <h2>Settings</h2>
+
+      <SyncPane />
 
       <div className="card">
         <h3>Security</h3>

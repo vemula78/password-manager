@@ -79,7 +79,11 @@ export type AuditEventType =
   | "emergency_kit_exported"
   | "history_cleared"
   | "items_imported"
-  | "autofill_used";
+  | "autofill_used"
+  /** A concurrent edit on two devices was resolved and the losing copy was preserved. */
+  | "item_conflicted"
+  | "sync_completed"
+  | "sync_failed";
 
 export interface AuditEvent {
   at: string;

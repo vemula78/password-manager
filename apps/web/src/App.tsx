@@ -14,6 +14,8 @@ export default function App() {
   const [blob, setBlob] = useState<string | null>(null);
   const [store, setStore] = useState<VaultStore | null>(null);
   const [fatal, setFatal] = useState("");
+  // Sync auth token: derived at unlock, held in memory only, cleared on lock.
+  const [authToken, setAuthToken] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -33,12 +35,14 @@ export default function App() {
     };
   }, []);
 
-  const handleUnlocked = useCallback((s: VaultStore) => {
+  const handleUnlocked = useCallback((s: VaultStore, token: string | null) => {
     setStore(s);
+    setAuthToken(token);
     setPhase("unlocked");
   }, []);
 
   const handleLock = useCallback(() => {
+    setAuthToken(null);
     setStore((s) => {
       try {
         s?.lock();
@@ -91,7 +95,12 @@ export default function App() {
   }
   if (phase === "unlocked" && store) {
     return (
-      <AppProvider store={store} onLock={handleLock} onReplaceStore={handleReplaceStore}>
+      <AppProvider
+        store={store}
+        authTokenB64={authToken}
+        onLock={handleLock}
+        onReplaceStore={handleReplaceStore}
+      >
         <Shell />
       </AppProvider>
     );

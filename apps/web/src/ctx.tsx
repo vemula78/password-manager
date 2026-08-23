@@ -20,6 +20,7 @@ import {
 import { KitOverlay } from "./components/Kit";
 import { Modal } from "./components/ui";
 import { type AppConfig, loadConfig, saveConfig } from "./lib/config";
+import { type SyncStatus, useSync } from "./lib/sync";
 
 export type CategoryKey =
   | "all"
@@ -77,6 +78,10 @@ export interface AppCtx {
   replaceStore(store: VaultStore): void;
   route: Route;
   navigate(route: Route): void;
+  /** Sync auth token derived at unlock; null when sync is off or not yet re-unlocked. */
+  authTokenB64: string | null;
+  syncStatus: SyncStatus;
+  syncNow(opts?: { silent?: boolean }): Promise<void>;
 }
 
 const Ctx = createContext<AppCtx | null>(null);
@@ -91,6 +96,7 @@ const REAUTH_CACHE_MS = 60_000;
 
 export function AppProvider(props: {
   store: VaultStore;
+  authTokenB64: string | null;
   onLock: () => void;
   onReplaceStore: (store: VaultStore) => void;
   children: ReactNode;
@@ -126,6 +132,30 @@ export function AppProvider(props: {
       return next;
     });
   }, []);
+
+  const { status: syncStatus, syncNow } = useSync(
+    store,
+    config,
+    updateConfig,
+    toast,
+    props.authTokenB64,
+  );
+
+  // Sync on unlock, then on a slow timer. Deliberately not on every keystroke-save: each
+  // cycle is a network round trip, and the local vault is authoritative between syncs.
+  useEffect(() => {
+    if (!config.sync.enabled) return;
+    void syncNow({ silent: true });
+    const id = window.setInterval(() => void syncNow({ silent: true }), 2 * 60_000);
+    const onOnline = () => void syncNow({ silent: true });
+    window.addEventListener("online", onOnline);
+    return () => {
+      window.clearInterval(id);
+      window.removeEventListener("online", onOnline);
+    };
+    // syncNow is recreated whenever config changes; re-running the effect is harmless
+    // because syncNow itself guards against overlapping cycles.
+  }, [config.sync.enabled, syncNow]);
 
   const lockNow = useCallback(() => {
     reauthCache.current = null;
@@ -223,8 +253,11 @@ export function AppProvider(props: {
       replaceStore: props.onReplaceStore,
       route,
       navigate,
+      authTokenB64: props.authTokenB64,
+      syncStatus,
+      syncNow,
     }),
-    [store, rev, refresh, lockNow, requestReauth, copyWithClear, toast, config, updateConfig, route, props.onReplaceStore],
+    [store, rev, refresh, lockNow, requestReauth, copyWithClear, toast, config, updateConfig, route, props.onReplaceStore, props.authTokenB64, syncStatus, syncNow],
   );
 
   return (

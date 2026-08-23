@@ -1,8 +1,12 @@
 {
   "name": "pw-manager",
   "private": true,
-  "workspaces": ["packages/*", "apps/*"],
+  "workspaces": [
+    "packages/*",
+    "apps/*"
+  ],
   "scripts": {
-    "test": "npm --workspace @pw/core run test"
+    "test": "npm --workspace @pw/core run test && npm --workspace @pw/sync run test && npm --workspace @pw/server run test",
+    "typecheck": "npm --workspace @pw/core run typecheck && npm --workspace @pw/sync run typecheck && npm --workspace @pw/server run typecheck && npm --workspace @pw/web run typecheck"
   }
 }
