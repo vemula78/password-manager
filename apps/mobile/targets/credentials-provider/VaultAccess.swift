@@ -114,12 +114,15 @@ enum VaultAccess {
   }
 
   private static func encryptForAudit(_ plaintext: Data, key: [UInt8]) -> [String: String]? {
+    // swift-sodium overloads encrypt() on its return type (combined bytes vs. a
+    // (ciphertext, nonce) tuple); the annotation selects the tuple form.
     guard
-      let result = sodium.aead.xchacha20poly1305ietf.encrypt(
-        message: [UInt8](plaintext),
-        secretKey: key,
-        additionalData: Array("audit:v1".utf8)
-      )
+      let result: (authenticatedCipherText: [UInt8], nonce: [UInt8]) =
+        sodium.aead.xchacha20poly1305ietf.encrypt(
+          message: [UInt8](plaintext),
+          secretKey: key,
+          additionalData: Array("audit:v1".utf8)
+        )
     else { return nil }
     return [
       "nonceB64": Data(result.nonce).base64EncodedString(),
