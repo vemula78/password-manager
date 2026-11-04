@@ -90,9 +90,9 @@ create pods) in Xcode.
 2. Make sure "Automatically manage signing" is on and your Team is selected (should already
    match `appleTeamId` from step 2 — if Xcode shows a different/no team, fix it here and Xcode
    will offer to update `app.json` for you, or update it by hand to match).
-3. Confirm two capabilities are listed: **App Groups** (`group.org.pwmanager.vault`) and
+3. Confirm two capabilities are listed: **App Groups** (`group.net.sohoki.pwvault`) and
    **AutoFill Credential Provider**. If App Groups shows an error ("no group selected" or
-   similar), click it and re-select/re-add `group.org.pwmanager.vault` — the first time a new
+   similar), click it and re-select/re-add `group.net.sohoki.pwvault` — the first time a new
    App Group ID is used on your account, Xcode/the Apple Developer portal has to register it,
    which requires being online and signed in.
 4. Repeat steps 1–3 for the **credentials-provider** target (same Team, same two capabilities
@@ -132,7 +132,7 @@ create pods) in Xcode.
 - Enabling Face ID unlock in the app (Settings screen) now does two things: stores the master
   password in the app-private Keychain (unchanged, as before), AND writes the raw Vault Key into
   a **separate** Keychain item shared with the extension (`kSecAttrAccessGroup:
-  group.org.pwmanager.vault`), protected by a `SecAccessControl` requiring Face ID/Touch ID/
+  group.net.sohoki.pwvault`), protected by a `SecAccessControl` requiring Face ID/Touch ID/
   passcode (`.userPresence`).
 - Turning Face ID unlock OFF deletes both.
 - If you've never turned on Face ID unlock in the app, the extension has nothing to read and
@@ -215,7 +215,7 @@ This is close to everything about actual runtime behavior — none of it has run
 
 **Mobile app (`apps/mobile/`)**
 - `app.json` — added `ios.entitlements` for App Groups
-  (`group.org.pwmanager.vault`) and the AutoFill credential-provider entitlement. Still needs
+  (`group.net.sohoki.pwvault`) and the AutoFill credential-provider entitlement. Still needs
   `ios.appleTeamId` (step 2 above).
 - `src/storage.ts` — vault file now reads/writes in the App Group's shared container on iOS
   (via `expo-file-system`'s built-in `Paths.appleSharedContainers`, not a custom native path
@@ -232,7 +232,7 @@ This is close to everything about actual runtime behavior — none of it has run
 
 **Local Expo Module (`apps/mobile/modules/shared-vault-store/`)**
 - `ios/SharedVaultStoreModule.swift` — `storeSharedVaultKey`, `deleteSharedVaultKey` (shared
-  Keychain, access group `group.org.pwmanager.vault`, `.userPresence` access control), and
+  Keychain, access group `group.net.sohoki.pwvault`, `.userPresence` access control), and
   `syncCredentialIdentities` (`ASCredentialIdentityStore.replaceCredentialIdentities`).
 - `android/.../SharedVaultStoreModule.kt` — stub that throws; this feature is iOS-only and every
   JS call site branches on `Platform.OS === "ios"` first.

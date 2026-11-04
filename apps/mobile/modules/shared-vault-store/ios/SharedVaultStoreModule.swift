@@ -4,12 +4,12 @@ import Security
 
 // Must match app.json's expo.ios.entitlements["com.apple.security.application-groups"][0]
 // and targets/credentials-provider/expo-target.config.js's app-groups entry exactly.
-let pwmAppGroupId = "group.org.pwmanager.vault"
+let pwmAppGroupId = "group.net.sohoki.pwvault"
 
 // Keychain item that holds the raw 32-byte Vault Key (VK), gated behind Face ID/Touch ID/
 // passcode. Shared (via kSecAttrAccessGroup) with the credentials-provider extension so it can
 // decrypt items without re-deriving the KEK from the master password.
-private let pwmVaultKeyService = "org.pwmanager.vault.sharedvaultkey"
+private let pwmVaultKeyService = "net.sohoki.pwvault.sharedvaultkey"
 private let pwmVaultKeyAccount = "vaultKey"
 
 final class InvalidVaultKeyError: Exception {
@@ -60,7 +60,7 @@ public class SharedVaultStoreModule: Module {
     Name("SharedVaultStore")
 
     // NOTE: the shared container *path* itself is not exposed here — expo-file-system (57.x)
-    // already exposes it natively via `Paths.appleSharedContainers["group.org.pwmanager.vault"]`
+    // already exposes it natively via `Paths.appleSharedContainers["group.net.sohoki.pwvault"]`
     // (see FileSystemModule.swift's "appleSharedContainers" constant), which returns a properly
     // formed `file://` URI ready to hand to `new Directory(...)`. storage.ts uses that instead
     // of reinventing it here. This module covers the two things with no existing Expo API:

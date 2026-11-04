@@ -15,7 +15,7 @@ import SharedVaultStore from "../modules/shared-vault-store/src/SharedVaultStore
 const VAULT_FILENAME = "vault.json";
 // Must match app.json's expo.ios.entitlements["com.apple.security.application-groups"][0] and
 // targets/credentials-provider/expo-target.config.js's app-groups entry exactly.
-const APP_GROUP_ID = "group.org.pwmanager.vault";
+const APP_GROUP_ID = "group.net.sohoki.pwvault";
 
 /**
  * Thrown on iOS when the shared App Group container can't be resolved. On a correctly

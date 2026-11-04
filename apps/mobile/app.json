@@ -8,13 +8,14 @@
     "userInterfaceStyle": "light",
     "ios": {
       "supportsTablet": true,
-      "bundleIdentifier": "org.pwmanager.vault",
+      "bundleIdentifier": "net.sohoki.pwvault",
+      "appleTeamId": "26GLWD7JZL",
       "infoPlist": {
         "NSFaceIDUsageDescription": "Face ID is used to unlock your vault and to reveal or copy sensitive fields."
       },
       "entitlements": {
         "com.apple.security.application-groups": [
-          "group.org.pwmanager.vault"
+          "group.net.sohoki.pwvault"
         ],
         "com.apple.developer.authentication-services.autofill-credential-provider": true
       }

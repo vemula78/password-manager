@@ -15,8 +15,8 @@ import Security
 //   - associated data for the audit log: "audit:v1" (packages/core/src/vault.ts's `AD_AUDIT`)
 enum VaultAccess {
   // Must match app.json / expo-target.config.js's app-groups entry exactly.
-  static let appGroupId = "group.org.pwmanager.vault"
-  static let vaultKeyService = "org.pwmanager.vault.sharedvaultkey"
+  static let appGroupId = "group.net.sohoki.pwvault"
+  static let vaultKeyService = "net.sohoki.pwvault.sharedvaultkey"
   static let vaultKeyAccount = "vaultKey"
   static let vaultFileName = "vault.json"
 
