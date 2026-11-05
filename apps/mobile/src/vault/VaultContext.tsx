@@ -70,7 +70,13 @@ interface VaultContextValue {
   refresh: () => void;
   prefs: DevicePrefs;
   setPrefs: (p: Partial<DevicePrefs>) => void;
+  /**
+   * Creates the vault and holds the store without opening it: the caller must show the
+   * recovery key and then call completeOnboarding(). Opening it here would swap the screen
+   * away before the recovery-key step could render.
+   */
   createVault: (masterPassword: string) => Promise<VaultStore>;
+  completeOnboarding: () => void;
   unlockWithPassword: (password: string) => Promise<void>;
   unlockWithRecoveryKey: (recoveryKey: string) => Promise<VaultStore>;
   unlockWithBiometrics: () => Promise<boolean>;
@@ -222,11 +228,12 @@ export function VaultProvider({ children }: { children: React.ReactNode }) {
     async (masterPassword: string) => {
       const s = await VaultStore.create(masterPassword, fileStorage, { deviceId: syncIdentity.deviceId });
       setStore(s);
-      setStatus("unlocked");
       return s;
     },
     [syncIdentity.deviceId],
   );
+
+  const completeOnboarding = useCallback(() => setStatus("unlocked"), []);
 
   const unlockWithPassword = useCallback(
     async (password: string) => {
@@ -419,6 +426,7 @@ export function VaultProvider({ children }: { children: React.ReactNode }) {
       prefs,
       setPrefs,
       createVault,
+      completeOnboarding,
       unlockWithPassword,
       unlockWithRecoveryKey,
       unlockWithBiometrics,
@@ -436,7 +444,7 @@ export function VaultProvider({ children }: { children: React.ReactNode }) {
       pushSyncHeader: pushHeaderNow,
       pushSyncRecoveryVerifier: pushRecoveryVerifier,
     }),
-    [status, errorMessage, store, tick, refresh, prefs, setPrefs, createVault, unlockWithPassword,
+    [status, errorMessage, store, tick, refresh, prefs, setPrefs, createVault, completeOnboarding, unlockWithPassword,
      unlockWithRecoveryKey, unlockWithBiometrics, lock, adoptStore, enableBiometrics,
      disableBiometrics, reauth, reauthPassword, syncIdentity, updateSyncConfig, authTokenB64,
      syncStatus, syncNow, pushHeaderNow, pushRecoveryVerifier],

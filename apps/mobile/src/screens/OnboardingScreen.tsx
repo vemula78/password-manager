@@ -10,7 +10,7 @@ import { RecoveryKeyCard } from "../components/RecoveryKeyCard";
 import { colors, spacing } from "../theme";
 
 export function OnboardingScreen({ onRestoreInstead }: { onRestoreInstead: () => void }) {
-  const { createVault, store } = useVault();
+  const { createVault, completeOnboarding, store } = useVault();
   const [step, setStep] = useState<"password" | "kit" | "done">("password");
   const [password, setPassword] = useState("");
   const [confirm, setConfirm] = useState("");
@@ -51,7 +51,7 @@ export function OnboardingScreen({ onRestoreInstead }: { onRestoreInstead: () =>
           clipboardClearSeconds={store?.settings.clipboardClearSeconds ?? 30}
           onConfirmed={() => {
             setRecoveryKey(null); // never kept in state beyond this screen
-            setStep("done");
+            completeOnboarding();
           }}
         />
       </ScrollView>
