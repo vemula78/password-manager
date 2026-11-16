@@ -10,6 +10,7 @@
       "supportsTablet": true,
       "bundleIdentifier": "net.sohoki.pwvault",
       "appleTeamId": "26GLWD7JZL",
+      "buildNumber": "2",
       "infoPlist": {
         "NSFaceIDUsageDescription": "Face ID is used to unlock your vault and to reveal or copy sensitive fields."
       },
