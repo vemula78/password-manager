@@ -3,7 +3,10 @@
 import React, { useState } from "react";
 import { Share, StyleSheet, Text, TouchableOpacity, View } from "react-native";
 import { usePreventScreenCapture } from "expo-screen-capture";
+import * as Print from "expo-print";
 import { Button, WarningBanner } from "./ui";
+import { kitToHtml, mobileKit } from "../kit/kitHtml";
+import { useVault } from "../vault/VaultContext";
 import { copyWithAutoClear } from "../security/clipboard";
 import { colors, spacing } from "../theme";
 
@@ -17,6 +20,7 @@ export function RecoveryKeyCard({
   clipboardClearSeconds: number;
 }) {
   usePreventScreenCapture("recovery-key");
+  const { store } = useVault();
   const [checked, setChecked] = useState(false);
   const [copied, setCopied] = useState(false);
 
@@ -46,6 +50,25 @@ export function RecoveryKeyCard({
         onPress={() => {
           void Share.share({
             message: `Password Vault recovery key (store offline, never inside the vault):\n\n${recoveryKey}`,
+          });
+        }}
+      />
+      <Button
+        title="Print emergency kit / save as PDF"
+        kind="secondary"
+        onPress={() => {
+          const s = store?.settings;
+          const html = kitToHtml(
+            mobileKit({
+              recoveryKey,
+              ownerName: s?.ownerName,
+              emergencyContact: s?.emergencyContact,
+              hasDriveBackup: !!s?.backup.driveFolderId,
+            }),
+          );
+          // Opens the iOS print sheet (AirPrint; pinch the preview or use Share → Save to Files for a PDF).
+          void Print.printAsync({ html }).catch(() => {
+            // Dismissing the print sheet rejects on some platforms; nothing to handle.
           });
         }}
       />
